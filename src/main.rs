@@ -9,7 +9,7 @@ use eframe::egui::text::{CCursor, CCursorRange, LayoutJob};
 use eframe::egui::{
     self, pos2, vec2, Align, Align2, Color32, FontId, Key, Layout, Modifiers, RichText, Sense, TextFormat,
 };
-use settings::{ProjectSettings, Settings, TrustStore};
+use settings::{ProjectSettings, Settings, TrustStore, SessionData};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -20,8 +20,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
-
-// ───────────────────────── вспомогательное ─────────────────────────
 
 fn ext_of(p: &Path) -> String {
     p.extension().and_then(|e| e.to_str()).unwrap_or("txt").to_string()
@@ -98,7 +96,6 @@ fn badge_color(c: char) -> Color32 {
     }
 }
 
-// Позиция курсора / правка текста в TextEdit
 fn cursor_range(ctx: &egui::Context, id: egui::Id) -> Option<(usize, usize)> {
     let st = egui::TextEdit::load_state(ctx, id)?;
     let r = st.cursor.char_range()?;
@@ -116,8 +113,6 @@ fn replace_range(ctx: &egui::Context, id: egui::Id, text: &mut String, a: usize,
         st.store(ctx, id);
     }
 }
-
-// ───────────────────────── структуры ─────────────────────────
 
 struct Tab {
     uid: u64,
@@ -185,7 +180,6 @@ enum GitAct {
 }
 
 struct App {
-    // настройки и доверие
     user: Settings,
     project: ProjectSettings,
     eff: Settings,
@@ -198,7 +192,6 @@ struct App {
     applied_theme: String,
     dark: bool,
 
-    // рабочая область
     root: Option<PathBuf>,
     tabs: Vec<Tab>,
     active: usize,
@@ -207,16 +200,13 @@ struct App {
     new_entry: Option<(PathBuf, bool, String)>,
     status: String,
 
-    // подсветка
     ss: SyntaxSet,
     themes: ThemeSet,
 
-    // боковая панель
     show_side: bool,
     side: Side,
     dir_cache: HashMap<PathBuf, (Instant, Arc<Vec<Entry>>)>,
 
-    // git
     git: Option<git::Status>,
     git_busy: bool,
     git_dirty: bool,
@@ -227,7 +217,6 @@ struct App {
     new_branch: String,
     confirm_discard: Option<(git::GitFile, PathBuf)>,
 
-    // терминал
     show_terminal: bool,
     terminals: Vec<terminal::Terminal>,
     term_active: usize,
@@ -236,21 +225,48 @@ struct App {
     want_new_term: bool,
     term_counter: usize,
 
+    show_about: bool,
+    show_github: bool,
+    show_plugins: bool,
+    show_output: bool,
+    output_log: String,
+
+    all_suggestions: Vec<String>,
+    autocomplete_open: bool,
+    autocomplete_idx: usize,
+    autocomplete_suggestions: Vec<String>,
+    autocomplete_start_char: usize,
+
+    show_find: bool,
+    focus_find: bool,
+    find_text: String,
+    replace_text: String,
+    show_goto: bool,
+    focus_goto: bool,
+    goto_line: usize,
+    scroll_to_char: Option<usize>,
+
+    session: SessionData,
+    restoring_cursors: bool,
+
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let user: Settings = settings::load_json(&settings::user_settings_path());
         let themes = ThemeSet::load_defaults();
         let mut sb = SyntaxSet::load_defaults_newlines().into_builder();
         let extra = settings::config_dir().join("syntaxes");
         if extra.is_dir() {
-            let _ = sb.add_from_folder(&extra, true); // свои .sublime-syntax
+            let _ = sb.add_from_folder(&extra, true);
         }
+
+        egui_extras::install_image_loaders(&cc.egui_ctx);
+
         let (tx, rx) = channel();
-        Self {
+        let mut app = Self {
             eff: user.clone(),
             user,
             project: ProjectSettings::default(),
@@ -290,12 +306,48 @@ impl App {
             term_focused: false,
             want_new_term: false,
             term_counter: 0,
+
+            show_about: false,
+            show_github: false,
+            show_plugins: false,
+            show_output: false,
+            output_log: String::new(),
+
+            all_suggestions: Vec::new(),
+            autocomplete_open: false,
+            autocomplete_idx: 0,
+            autocomplete_suggestions: Vec::new(),
+            autocomplete_start_char: 0,
+
+            show_find: false,
+            focus_find: false,
+            find_text: String::new(),
+            replace_text: String::new(),
+            show_goto: false,
+            focus_goto: false,
+            goto_line: 1,
+            scroll_to_char: None,
+
+            session: SessionData::load(),
+            restoring_cursors: true,
             tx,
             rx,
-        }
-    }
+        };
 
-    // ───────── настройки / доверие ─────────
+        if let Some(root) = app.session.root.clone() {
+            if root.exists() {
+                app.set_root(root);
+                let tabs_to_open = app.session.tabs.clone();
+                for tab_path in tabs_to_open {
+                    app.open_file(tab_path);
+                }
+                if app.session.active < app.tabs.len() {
+                    app.active = app.session.active;
+                }
+            }
+        }
+        app
+    }
 
     fn recompute(&mut self) {
         self.eff = if self.trusted { self.user.merged(&self.project) } else { self.user.clone() };
@@ -327,6 +379,15 @@ impl App {
     }
 
     fn apply_theme(&mut self, ctx: &egui::Context) {
+        let mut style = (*ctx.style()).clone();
+        style.visuals.widgets.noninteractive.rounding = egui::Rounding::same(6.0);
+        style.visuals.widgets.inactive.rounding = egui::Rounding::same(6.0);
+        style.visuals.widgets.hovered.rounding = egui::Rounding::same(6.0);
+        style.visuals.widgets.active.rounding = egui::Rounding::same(6.0);
+        style.visuals.window_rounding = egui::Rounding::same(10.0);
+        style.animation_time = 0.15;
+        ctx.set_style(style);
+
         if self.applied_theme != self.eff.theme {
             self.dark = is_dark(&self.eff.theme);
             ctx.set_visuals(if self.dark { egui::Visuals::dark() } else { egui::Visuals::light() });
@@ -334,15 +395,9 @@ impl App {
         }
     }
 
-    // ───────── файлы ─────────
-
     fn open_file(&mut self, path: PathBuf) {
         let c = canon(&path);
-        if let Some(i) = self
-            .tabs
-            .iter()
-            .position(|t| !t.readonly && t.path.as_ref().map(|p| canon(p)) == Some(c.clone()))
-        {
+        if let Some(i) = self.tabs.iter().position(|t| !t.readonly && t.path.as_ref().map(|p| canon(p)) == Some(c.clone())) {
             self.active = i;
             return;
         }
@@ -357,10 +412,12 @@ impl App {
                 let uid = self.next_uid;
                 self.next_uid += 1;
                 self.status = format!("Открыт {}", path.display());
-                self.tabs.push(Tab::new(uid, Some(path.clone()), name_of(&path), text, ext_of(&path), false));
+                let readonly = !self.trusted;
+                self.tabs.push(Tab::new(uid, Some(path.clone()), name_of(&path), text, ext_of(&path), readonly));
                 self.active = self.tabs.len() - 1;
+                self.update_suggestions();
             }
-            Err(e) => self.status = format!("Не удалось открыть (не UTF-8 или нет доступа): {e}"),
+            Err(e) => self.status = format!("Не удалось открыть: {e}"),
         }
     }
 
@@ -379,6 +436,10 @@ impl App {
     }
 
     fn save_tab(&mut self, idx: usize) {
+        if !self.trusted {
+            self.status = "Нельзя сохранять в недоверенном проекте".into();
+            return;
+        }
         let Some(tab) = self.tabs.get_mut(idx) else { return };
         if tab.readonly {
             return;
@@ -402,22 +463,19 @@ impl App {
                 tab.dirty = false;
                 self.status = format!("Сохранено {}", p.display());
                 self.git_dirty = true;
+                self.update_suggestions();
             }
             Err(e) => self.status = format!("Ошибка записи: {e}"),
         }
     }
 
     fn close_tab(&mut self, i: usize) {
-        if i >= self.tabs.len() {
-            return;
-        }
+        if i >= self.tabs.len() { return; }
         self.tabs.remove(i);
         if self.tabs.is_empty() {
             self.active = 0;
         } else {
-            if i < self.active {
-                self.active -= 1;
-            }
+            if i < self.active { self.active -= 1; }
             self.active = self.active.min(self.tabs.len() - 1);
         }
     }
@@ -431,24 +489,18 @@ impl App {
     }
 
     fn autosave(&mut self) {
-        if !self.eff.auto_save {
-            return;
-        }
-        let idxs: Vec<usize> = self
-            .tabs
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| {
-                t.dirty && !t.readonly && t.path.is_some() && t.last_edit.elapsed() > Duration::from_millis(1200)
-            })
-            .map(|(i, _)| i)
-            .collect();
-        for i in idxs {
-            self.save_tab(i);
-        }
+        if !self.eff.auto_save || !self.trusted { return; }
+        let idxs: Vec<usize> = self.tabs.iter().enumerate()
+            .filter(|(_, t)| t.dirty && !t.readonly && t.path.is_some() && t.last_edit.elapsed() > Duration::from_millis(1200))
+            .map(|(i, _)| i).collect();
+        for i in idxs { self.save_tab(i); }
     }
 
     fn create_entry(&mut self, dir: PathBuf, is_dir: bool, name: &str) {
+        if !self.trusted {
+            self.status = "Нельзя создавать файлы в недоверенном проекте".into();
+            return;
+        }
         let name = name.trim();
         if name.is_empty() || Path::new(name).is_absolute() || name.contains("..") {
             self.status = "Некорректное имя".into();
@@ -458,24 +510,97 @@ impl App {
         let res = if is_dir {
             std::fs::create_dir_all(&p)
         } else {
-            p.parent()
-                .map(std::fs::create_dir_all)
-                .transpose()
+            p.parent().map(std::fs::create_dir_all).transpose()
                 .and_then(|_| std::fs::OpenOptions::new().write(true).create_new(true).open(&p).map(|_| ()))
         };
         match res {
             Ok(_) => {
                 self.dir_cache.clear();
                 self.git_dirty = true;
-                if !is_dir {
-                    self.open_file(p);
-                }
+                self.update_suggestions();
+                if !is_dir { self.open_file(p); }
             }
             Err(e) => self.status = format!("Не удалось создать: {e}"),
         }
     }
 
-    // ───────── фоновые задачи / git ─────────
+    fn update_suggestions(&mut self) {
+        self.all_suggestions.clear();
+        let mut seen = std::collections::HashSet::new();
+
+        for tab in &self.tabs {
+            for word in tab.text.split(|c: char| !c.is_alphanumeric() && c != '_') {
+                if word.len() > 2 && !seen.contains(word) {
+                    seen.insert(word.to_string());
+                    self.all_suggestions.push(word.to_string());
+                }
+            }
+        }
+
+        if let Some(root) = &self.root {
+            if let Ok(entries) = std::fs::read_dir(root) {
+                for entry in entries.flatten() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        let word = name.split('.').next().unwrap_or(name);
+                        if word.len() > 2 && !seen.contains(word) {
+                            seen.insert(word.to_string());
+                            self.all_suggestions.push(word.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        self.all_suggestions.sort();
+        self.all_suggestions.truncate(200);
+    }
+
+    fn run_command(&mut self, cmd_str: &str, is_build: bool) {
+        if !self.trusted {
+            self.status = "Запуск запрещен в недоверенном режиме".into();
+            return;
+        }
+        let Some(root) = &self.root else { return };
+
+        let cmd = if cmd_str.is_empty() {
+            let ext = self.tabs.get(self.active).map(|t| t.ext.as_str()).unwrap_or("");
+            if ext == "rs" { if is_build { "cargo build".into() } else { "cargo run".into() } }
+            else if ext == "py" { "python".into() }
+            else if ext == "go" { "go run .".into() }
+            else if ext == "c" || ext == "cpp" { "gcc main.c -o main && ./main".into() }
+            else {
+                self.status = "Неизвестный тип файла для запуска".into();
+                return;
+            }
+        } else {
+            cmd_str.to_string()
+        };
+
+        self.output_log.clear();
+        self.output_log.push_str(&format!("> {}\n", cmd));
+        self.show_output = true;
+
+        let output = if cfg!(windows) {
+            std::process::Command::new("cmd").args(&["/C", &cmd]).current_dir(root).output()
+        } else {
+            std::process::Command::new("sh").args(&["-c", &cmd]).current_dir(root).output()
+        };
+
+        match output {
+            Ok(out) => {
+                self.output_log.push_str(&String::from_utf8_lossy(&out.stdout));
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if !stderr.is_empty() {
+                    self.output_log.push_str("\n--- STDERR ---\n");
+                    self.output_log.push_str(&stderr);
+                }
+                self.status = if out.status.success() { "Успешно выполнено".into() } else { "Ошибка выполнения".into() };
+            }
+            Err(e) => {
+                self.output_log.push_str(&format!("Ошибка запуска: {}\n", e));
+                self.status = "Ошибка запуска".into();
+            }
+        }
+    }
 
     fn bg<F: FnOnce(Sender<Msg>) + Send + 'static>(&self, ctx: &egui::Context, f: F) {
         let tx = self.tx.clone();
@@ -496,9 +621,7 @@ impl App {
                 Msg::GitDone { label, result } => {
                     match result {
                         Ok(s) => {
-                            if label == "commit" {
-                                self.commit_msg.clear();
-                            }
+                            if label == "commit" { self.commit_msg.clear(); }
                             self.git_msg = format!("✔ {label}\n{}", s.trim());
                             self.status = format!("git: {label} — готово");
                         }
@@ -521,9 +644,7 @@ impl App {
                 let p = root.join(rel.trim_end_matches('/'));
                 let mut a = p.parent();
                 while let Some(d) = a {
-                    if d == root.as_path() {
-                        break;
-                    }
+                    if d == root.as_path() { break; }
                     self.badges.entry(d.to_path_buf()).or_insert('•');
                     a = d.parent();
                 }
@@ -534,16 +655,12 @@ impl App {
     }
 
     fn poll_git(&mut self, ctx: &egui::Context) {
-        if !self.trusted || self.git_busy {
-            return;
-        }
+        if !self.trusted || self.git_busy { return; }
         let Some(root) = self.root.clone() else { return };
         let mult = if matches!(self.git, Some(git::Status::Repo(_))) { 1 } else { 5 };
         let due = self.last_poll.elapsed() >= Duration::from_secs(self.eff.git_poll_secs.max(1) * mult);
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
-        if !(self.git_dirty || (due && focused)) {
-            return;
-        }
+        if !(self.git_dirty || (due && focused)) { return; }
         self.git_busy = true;
         self.git_dirty = false;
         self.last_poll = Instant::now();
@@ -570,11 +687,8 @@ impl App {
             GitAct::Diff { title, top, path, staged } => {
                 self.bg(ctx, move |tx| {
                     let mut a = vec!["diff"];
-                    if staged {
-                        a.push("--cached");
-                    }
-                    a.push("--");
-                    a.push(&path);
+                    if staged { a.push("--cached"); }
+                    a.push("--"); a.push(&path);
                     let text = git::run(&top, &a).unwrap_or_else(|e| e);
                     let text = if text.trim().is_empty() { "(нет изменений)".to_string() } else { text };
                     let _ = tx.send(Msg::OpenText { title, text, ext: "diff".into() });
@@ -588,8 +702,6 @@ impl App {
             }
         }
     }
-
-    // ───────── терминал ─────────
 
     fn new_terminal(&mut self, ctx: &egui::Context) {
         let cwd = self.root.clone().unwrap_or_else(home_dir);
@@ -606,42 +718,27 @@ impl App {
         }
     }
 
-    // ───────── проводник ─────────
-
     fn excluded(&self, name: &str) -> bool {
         self.eff.explorer_exclude.iter().any(|pat| {
-            if let Some(suf) = pat.strip_prefix('*') {
-                name.ends_with(suf)
-            } else {
-                name == pat
-            }
+            if let Some(suf) = pat.strip_prefix('*') { name.ends_with(suf) } else { name == pat }
         })
     }
 
-    /// Листинг папки с кэшем (3 с) — диск не читается каждый кадр.
     fn list_dir(&mut self, dir: &Path) -> Arc<Vec<Entry>> {
         if let Some((t, v)) = self.dir_cache.get(dir) {
-            if t.elapsed() < Duration::from_secs(3) {
-                return v.clone();
-            }
+            if t.elapsed() < Duration::from_secs(3) { return v.clone(); }
         }
         let mut v = vec![];
         if let Ok(rd) = std::fs::read_dir(dir) {
             for e in rd.flatten() {
                 let name = e.file_name().to_string_lossy().to_string();
-                if self.excluded(&name) {
-                    continue;
-                }
+                if self.excluded(&name) { continue; }
                 let path = e.path();
                 let is_dir = path.is_dir();
                 v.push(Entry { path, name, is_dir });
             }
         }
-        v.sort_by(|a, b| {
-            b.is_dir
-                .cmp(&a.is_dir)
-                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-        });
+        v.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
         let v = Arc::new(v);
         self.dir_cache.insert(dir.to_path_buf(), (Instant::now(), v.clone()));
         v
@@ -653,13 +750,21 @@ impl App {
             let badge = self.badges.get(&e.path).copied();
             let color = badge.map(badge_color);
             if e.is_dir {
-                let mut t = RichText::new(format!("📁 {}", e.name));
-                if let Some(c) = color {
-                    t = t.color(c);
-                }
+                let mut t = RichText::new(&e.name);
+                if let Some(c) = color { t = t.color(c); }
+
                 let r = egui::CollapsingHeader::new(t)
                     .id_salt(&e.path)
+                    .icon(|ui, _open, response| {
+                        let rect = egui::Rect::from_center_size(
+                            response.rect.center(),
+                            vec2(16.0, 16.0),
+                        );
+                        egui::Image::new(egui::include_image!("../images/folder.png"))
+                            .paint_at(ui, rect);
+                    })
                     .show(ui, |ui| self.tree(ui, &e.path, act));
+
                 r.header_response.context_menu(|ui| {
                     if ui.button("Новый файл").clicked() {
                         *act = TreeAct::New { dir: e.path.clone(), is_dir: false };
@@ -673,10 +778,9 @@ impl App {
             } else {
                 let sel = self.tabs.get(self.active).and_then(|t| t.path.as_ref()) == Some(&e.path);
                 ui.horizontal(|ui| {
-                    let mut t = RichText::new(&e.name);
-                    if let Some(c) = color {
-                        t = t.color(c);
-                    }
+                    ui.add(egui::Image::new(egui::include_image!("../images/file.png")).max_size(vec2(16.0, 16.0)));
+                    let mut t = RichText::new(format!(" {}", e.name));
+                    if let Some(c) = color { t = t.color(c); }
                     if ui.selectable_label(sel, t).clicked() {
                         *act = TreeAct::Open(e.path.clone());
                     }
@@ -692,9 +796,7 @@ impl App {
         let Some(root) = self.root.clone() else {
             ui.label("Папка не открыта");
             if ui.button("Открыть папку…").clicked() {
-                if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                    self.set_root(p);
-                }
+                if let Some(p) = rfd::FileDialog::new().pick_folder() { self.set_root(p); }
             }
             return;
         };
@@ -705,11 +807,13 @@ impl App {
                     self.dir_cache.clear();
                     self.git_dirty = true;
                 }
-                if ui.small_button("📁+").on_hover_text("Новая папка").clicked() {
-                    self.new_entry = Some((root.clone(), true, String::new()));
-                }
-                if ui.small_button("📄+").on_hover_text("Новый файл").clicked() {
-                    self.new_entry = Some((root.clone(), false, String::new()));
+                if self.trusted {
+                    if ui.small_button("+📁").on_hover_text("Новая папка").clicked() {
+                        self.new_entry = Some((root.clone(), true, String::new()));
+                    }
+                    if ui.small_button("+📄").on_hover_text("Новый файл").clicked() {
+                        self.new_entry = Some((root.clone(), false, String::new()));
+                    }
                 }
             });
         });
@@ -725,14 +829,10 @@ impl App {
         }
     }
 
-    // ───────── панель Git ─────────
-
     fn git_ui(&mut self, ui: &mut egui::Ui) {
         if !self.trusted {
             ui.label("🛡 Git отключён в ограниченном режиме.");
-            if ui.button("Доверять папке…").clicked() {
-                self.trust_prompt = true;
-            }
+            if ui.button("Доверять папке…").clicked() { self.trust_prompt = true; }
             return;
         }
         let Some(root) = self.root.clone() else {
@@ -742,18 +842,14 @@ impl App {
         let ctx = ui.ctx().clone();
         let mut acts: Vec<GitAct> = vec![];
         match self.git.clone() {
-            None => {
-                ui.label("Загрузка…");
-            }
+            None => { ui.label("Загрузка…"); }
             Some(git::Status::NotRepo) => {
                 ui.label("Эта папка не является git-репозиторием.");
                 if ui.button("Инициализировать репозиторий").clicked() {
                     acts.push(GitAct::Op { label: "git init".into(), args: vec!["init".into()], top: root.clone() });
                 }
             }
-            Some(git::Status::Error(e)) => {
-                ui.colored_label(Color32::LIGHT_RED, e);
-            }
+            Some(git::Status::Error(e)) => { ui.colored_label(Color32::LIGHT_RED, e); }
             Some(git::Status::Repo(st)) => {
                 let top = st.top.clone();
                 let op = |label: &str, a: &[&str]| GitAct::Op {
@@ -771,115 +867,66 @@ impl App {
                                 }
                             }
                         });
-                    if ui.button("Обновить").clicked() {
-                        acts.push(GitAct::Refresh);
-                    }
+                    if ui.button("Обновить").clicked() { acts.push(GitAct::Refresh); }
                 });
                 ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.new_branch)
-                            .hint_text("новая ветка")
-                            .desired_width(110.0),
-                    );
-                    if ui
-                        .add_enabled(!self.new_branch.trim().is_empty(), egui::Button::new("Создать"))
-                        .clicked()
-                    {
+                    ui.add(egui::TextEdit::singleline(&mut self.new_branch).hint_text("новая ветка").desired_width(110.0));
+                    if ui.add_enabled(!self.new_branch.trim().is_empty(), egui::Button::new("Создать")).clicked() {
                         let n = self.new_branch.trim().to_string();
                         acts.push(op(&format!("checkout -b {n}"), &["checkout", "-b", &n]));
                         self.new_branch.clear();
                     }
                 });
                 ui.horizontal(|ui| {
-                    if ui.button("Fetch").clicked() {
-                        acts.push(op("fetch", &["fetch", "--all", "--prune"]));
-                    }
-                    if ui.button(format!("Pull ↓{}", st.behind)).clicked() {
-                        acts.push(op("pull", &["pull"]));
-                    }
+                    if ui.button("Fetch").clicked() { acts.push(op("fetch", &["fetch", "--all", "--prune"])); }
+                    if ui.button(format!("Pull ↓{}", st.behind)).clicked() { acts.push(op("pull", &["pull"])); }
                     if ui.button(format!("Push ↑{}", st.ahead)).clicked() {
-                        if st.upstream.is_empty() {
-                            acts.push(op("push", &["push", "-u", "origin", &st.branch]));
-                        } else {
-                            acts.push(op("push", &["push"]));
-                        }
+                        if st.upstream.is_empty() { acts.push(op("push", &["push", "-u", "origin", &st.branch])); }
+                        else { acts.push(op("push", &["push"])); }
                     }
                 });
                 ui.separator();
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.commit_msg)
-                        .hint_text("Сообщение коммита")
-                        .desired_rows(3)
-                        .desired_width(f32::INFINITY),
-                );
+                ui.add(egui::TextEdit::multiline(&mut self.commit_msg).hint_text("Сообщение коммита").desired_rows(3).desired_width(f32::INFINITY));
                 ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(!self.commit_msg.trim().is_empty(), egui::Button::new("✔ Commit"))
-                        .clicked()
-                    {
+                    if ui.add_enabled(!self.commit_msg.trim().is_empty(), egui::Button::new("✔ Commit")).clicked() {
                         let m = self.commit_msg.clone();
                         acts.push(op("commit", &["commit", "-m", &m]));
                     }
-                    if ui.button("Stage all").clicked() {
-                        acts.push(op("add -A", &["add", "-A"]));
-                    }
-                    if ui.button("История").clicked() {
-                        acts.push(GitAct::Log { top: top.clone() });
-                    }
+                    if ui.button("Stage all").clicked() { acts.push(op("add -A", &["add", "-A"])); }
+                    if ui.button("История").clicked() { acts.push(GitAct::Log { top: top.clone() }); }
                 });
                 ui.separator();
 
                 let staged: Vec<&git::GitFile> = st.files.iter().filter(|f| f.staged()).collect();
                 let changes: Vec<&git::GitFile> = st.files.iter().filter(|f| f.unstaged()).collect();
                 egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(ui.available_height() - 90.0).show(ui, |ui| {
-                    egui::CollapsingHeader::new(format!("В индексе ({})", staged.len()))
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            for f in &staged {
-                                ui.horizontal(|ui| {
-                                    ui.label(RichText::new(f.x.to_string()).color(badge_color(f.x)).monospace());
-                                    if ui.selectable_label(false, &f.path).clicked() {
-                                        acts.push(GitAct::Diff {
-                                            title: format!("Δ {} (index)", f.path),
-                                            top: top.clone(),
-                                            path: f.path.clone(),
-                                            staged: true,
-                                        });
-                                    }
-                                    if ui.small_button("-").on_hover_text("Убрать из индекса").clicked() {
-                                        acts.push(op("unstage", &["restore", "--staged", "--", &f.path]));
-                                    }
-                                });
-                            }
-                        });
-                    egui::CollapsingHeader::new(format!("Изменения ({})", changes.len()))
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            for f in &changes {
-                                ui.horizontal(|ui| {
-                                    let b = badge_char(f);
-                                    ui.label(RichText::new(b.to_string()).color(badge_color(b)).monospace());
-                                    if ui.selectable_label(false, &f.path).clicked() {
-                                        if f.untracked() {
-                                            acts.push(GitAct::OpenFile(top.join(&f.path)));
-                                        } else {
-                                            acts.push(GitAct::Diff {
-                                                title: format!("Δ {}", f.path),
-                                                top: top.clone(),
-                                                path: f.path.clone(),
-                                                staged: false,
-                                            });
-                                        }
-                                    }
-                                    if ui.small_button("+").on_hover_text("В индекс").clicked() {
-                                        acts.push(op("add", &["add", "--", &f.path]));
-                                    }
-                                    if ui.small_button("Откат").on_hover_text("Отменить изменения").clicked() {
-                                        acts.push(GitAct::Discard((*f).clone(), top.clone()));
-                                    }
-                                });
-                            }
-                        });
+                    egui::CollapsingHeader::new(format!("В индексе ({})", staged.len())).default_open(true).show(ui, |ui| {
+                        for f in &staged {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(f.x.to_string()).color(badge_color(f.x)).monospace());
+                                if ui.selectable_label(false, &f.path).clicked() {
+                                    acts.push(GitAct::Diff { title: format!("Δ {} (index)", f.path), top: top.clone(), path: f.path.clone(), staged: true });
+                                }
+                                if ui.small_button("-").on_hover_text("Убрать из индекса").clicked() {
+                                    acts.push(op("unstage", &["restore", "--staged", "--", &f.path]));
+                                }
+                            });
+                        }
+                    });
+                    egui::CollapsingHeader::new(format!("Изменения ({})", changes.len())).default_open(true).show(ui, |ui| {
+                        for f in &changes {
+                            ui.horizontal(|ui| {
+                                let b = badge_char(f);
+                                ui.label(RichText::new(b.to_string()).color(badge_color(b)).monospace());
+                                if ui.selectable_label(false, &f.path).clicked() {
+                                    if f.untracked() { acts.push(GitAct::OpenFile(top.join(&f.path))); }
+                                    else { acts.push(GitAct::Diff { title: format!("Δ {}", f.path), top: top.clone(), path: f.path.clone(), staged: false }); }
+                                }
+                                if ui.small_button("+").on_hover_text("В индекс").clicked() { acts.push(op("add", &["add", "--", &f.path])); }
+                                if ui.small_button("Откат").on_hover_text("Отменить изменения").clicked() { acts.push(GitAct::Discard((*f).clone(), top.clone())); }
+                            });
+                        }
+                    });
                 });
                 if !self.git_msg.is_empty() {
                     ui.separator();
@@ -889,52 +936,102 @@ impl App {
                 }
             }
         }
-        for a in acts {
-            self.run_git_act(&ctx, a);
-        }
+        for a in acts { self.run_git_act(&ctx, a); }
     }
 
-    // ───────── интерфейс ─────────
-
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        // Ctrl+` работает всегда; остальное — только если фокус не в терминале
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Backtick)) {
             self.show_terminal = !self.show_terminal;
         }
-        if self.term_focused {
-            return;
+        if self.term_focused { return; }
+
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F1)) { self.show_about = true; }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F8)) { self.show_github = true; }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F2)) { self.show_settings = true; }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F5)) {
+            let run_cmd = self.project.run_command.clone().unwrap_or_default();
+            self.run_command(&run_cmd, false);
         }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F7)) {
+            let build_cmd = self.project.build_command.clone().unwrap_or_default();
+            self.run_command(&build_cmd, true);
+        }
+
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::F)) {
+            self.show_find = true;
+            self.focus_find = true;
+            // Если в редакторе уже выделено слово — сразу подставим его в поиск
+            if let Some(tab) = self.tabs.get(self.active) {
+                let id = egui::Id::new(("editor", tab.uid));
+                if let Some((a, b)) = cursor_range(ctx, id) {
+                    if a != b {
+                        let slice = &tab.text[byte_idx(&tab.text, a)..byte_idx(&tab.text, b)];
+                        if !slice.contains('\n') {
+                            self.find_text = slice.to_string();
+                        }
+                    }
+                }
+            }
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::G)) {
+            self.show_goto = true;
+            self.focus_goto = true;
+        }
+
         let cs = Modifiers::COMMAND.plus(Modifiers::SHIFT);
-        if ctx.input_mut(|i| i.consume_key(cs, Key::G)) {
-            self.show_side = true;
-            self.side = Side::Git;
-        }
-        if ctx.input_mut(|i| i.consume_key(cs, Key::E)) {
-            self.show_side = true;
-            self.side = Side::Explorer;
-        }
+        if ctx.input_mut(|i| i.consume_key(cs, Key::G)) { self.show_side = true; self.side = Side::Git; }
+        if ctx.input_mut(|i| i.consume_key(cs, Key::E)) { self.show_side = true; self.side = Side::Explorer; }
         if ctx.input_mut(|i| i.consume_key(cs, Key::O)) {
-            if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                self.set_root(p);
-            }
+            if let Some(p) = rfd::FileDialog::new().pick_folder() { self.set_root(p); }
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::S)) {
-            self.save_tab(self.active);
-        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::S)) { self.save_tab(self.active); }
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::O)) {
-            if let Some(p) = rfd::FileDialog::new().pick_file() {
-                self.open_file(p);
-            }
+            if let Some(p) = rfd::FileDialog::new().pick_file() { self.open_file(p); }
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::W)) {
-            self.request_close(self.active);
-        }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::B)) {
-            self.show_side = !self.show_side;
-        }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Comma)) {
-            self.show_settings = true;
-        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::W)) { self.request_close(self.active); }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::B)) { self.show_side = !self.show_side; }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Comma)) { self.show_settings = true; }
+    }
+
+    fn ui_title_bar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("title_bar")
+            .frame(egui::Frame::none().inner_margin(egui::Margin::symmetric(8.0, 4.0)).fill(ctx.style().visuals.widgets.noninteractive.bg_fill))
+            .show(ctx, |ui| {
+                let title_bar_rect = ui.max_rect();
+                let response = ui.interact(title_bar_rect, egui::Id::new("title_bar_drag"), Sense::click_and_drag());
+
+                if response.drag_started() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+                if response.double_clicked() {
+                    let is_max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
+                }
+
+                ui.horizontal(|ui| {
+                    ui.add(egui::Image::new(egui::include_image!("../images/icon.png")).max_size(vec2(16.0, 16.0)));
+
+                    let project_name = self.root.as_ref().map(|p| name_of(p)).unwrap_or_else(|| "Без проекта".into());
+                    let title = if !self.trusted && self.root.is_some() {
+                        format!("RustCode || {} || 🔒 Ограниченный режим", project_name)
+                    } else if self.root.is_some() {
+                        format!("RustCode || {}", project_name)
+                    } else {
+                        "RustCode".to_string()
+                    };
+
+                    ui.label(RichText::new(title).strong());
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("✖").clicked() { ctx.send_viewport_cmd(egui::ViewportCommand::Close); }
+                        if ui.button("🗖").clicked() {
+                            let is_max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
+                        }
+                        if ui.button("🗕").clicked() { ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true)); }
+                    });
+                });
+            });
     }
 
     fn ui_menu(&mut self, ctx: &egui::Context) {
@@ -944,58 +1041,43 @@ impl App {
                     if ui.button("Новый файл").clicked() {
                         let uid = self.next_uid;
                         self.next_uid += 1;
-                        self.tabs.push(Tab::new(uid, None, "untitled".into(), String::new(), "txt".into(), false));
+                        self.tabs.push(Tab::new(uid, None, "untitled".into(), String::new(), "txt".into(), !self.trusted));
                         self.active = self.tabs.len() - 1;
                         ui.close_menu();
                     }
-                    if ui.button("Открыть файл…   Ctrl+O").clicked() {
-                        if let Some(p) = rfd::FileDialog::new().pick_file() {
-                            self.open_file(p);
-                        }
+                    if ui.button("Открыть файл…").clicked() {
+                        if let Some(p) = rfd::FileDialog::new().pick_file() { self.open_file(p); }
                         ui.close_menu();
                     }
-                    if ui.button("Открыть папку…   Ctrl+Shift+O").clicked() {
-                        if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                            self.set_root(p);
-                        }
+                    if ui.button("Открыть папку…").clicked() {
+                        if let Some(p) = rfd::FileDialog::new().pick_folder() { self.set_root(p); }
                         ui.close_menu();
                     }
-                    if ui.button("Сохранить   Ctrl+S").clicked() {
-                        self.save_tab(self.active);
-                        ui.close_menu();
-                    }
+                    if ui.button("Сохранить").clicked() { self.save_tab(self.active); ui.close_menu(); }
                     ui.separator();
-                    if ui.button("Настройки   Ctrl+,").clicked() {
-                        self.show_settings = true;
-                        ui.close_menu();
-                    }
+                    if ui.button("Настройки (F2)").clicked() { self.show_settings = true; ui.close_menu(); }
+                    if ui.button("Магазин плагинов").clicked() { self.show_plugins = true; ui.close_menu(); }
                 });
                 ui.menu_button("Вид", |ui| {
-                    if ui.button("Боковая панель   Ctrl+B").clicked() {
-                        self.show_side = !self.show_side;
+                    if ui.button("Боковая панель").clicked() { self.show_side = !self.show_side; ui.close_menu(); }
+                    if ui.button("Терминал").clicked() { self.show_terminal = !self.show_terminal; ui.close_menu(); }
+                    if ui.button("Вывод (Output)").clicked() { self.show_output = !self.show_output; ui.close_menu(); }
+                });
+                ui.menu_button("Запуск", |ui| {
+                    if ui.button("Запустить (F5)").clicked() {
+                        let run_cmd = self.project.run_command.clone().unwrap_or_default();
+                        self.run_command(&run_cmd, false);
                         ui.close_menu();
                     }
-                    if ui.button("Проводник   Ctrl+Shift+E").clicked() {
-                        self.show_side = true;
-                        self.side = Side::Explorer;
-                        ui.close_menu();
-                    }
-                    if ui.button("Git   Ctrl+Shift+G").clicked() {
-                        self.show_side = true;
-                        self.side = Side::Git;
-                        ui.close_menu();
-                    }
-                    if ui.button("Терминал   Ctrl+`").clicked() {
-                        self.show_terminal = !self.show_terminal;
+                    if ui.button("Скомпилировать (F7)").clicked() {
+                        let build_cmd = self.project.build_command.clone().unwrap_or_default();
+                        self.run_command(&build_cmd, true);
                         ui.close_menu();
                     }
                 });
-                ui.menu_button("Терминал", |ui| {
-                    if ui.button("Новый терминал").clicked() {
-                        self.show_terminal = true;
-                        self.want_new_term = true;
-                        ui.close_menu();
-                    }
+                ui.menu_button("Справка", |ui| {
+                    if ui.button("О программе (F1)").clicked() { self.show_about = true; ui.close_menu(); }
+                    if ui.button("GitHub").clicked() { self.show_github = true; ui.close_menu(); }
                 });
             });
         });
@@ -1005,30 +1087,26 @@ impl App {
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if !self.trusted && self.root.is_some() {
-                    if ui
-                        .button(RichText::new("🛡 Ограниченный режим").color(Color32::from_rgb(230, 160, 60)))
-                        .clicked()
-                    {
+                    if ui.button(RichText::new("🛡 Ограниченный режим").color(Color32::from_rgb(230, 160, 60))).clicked() {
                         self.trust_prompt = true;
                     }
                 }
                 if let Some(git::Status::Repo(s)) = &self.git {
                     let t = format!("git: {} ↓{} ↑{}", s.branch, s.behind, s.ahead);
-                    if ui.button(t).clicked() {
-                        self.show_side = true;
-                        self.side = Side::Git;
-                    }
+                    if ui.button(t).clicked() { self.show_side = true; self.side = Side::Git; }
                 }
                 ui.label(&self.status);
+
+                if self.show_output {
+                    let errors = self.output_log.lines().filter(|l| l.contains("error")).count();
+                    let warnings = self.output_log.lines().filter(|l| l.contains("warning")).count();
+                    if errors > 0 { ui.colored_label(Color32::LIGHT_RED, format!("🔴 {} err", errors)); }
+                    if warnings > 0 { ui.colored_label(Color32::YELLOW, format!("🟡 {} warn", warnings)); }
+                }
+
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("⚙").on_hover_text("Настройки").clicked() {
-                        self.show_settings = true;
-                    }
-                    let ind = if self.eff.insert_spaces {
-                        format!("Пробелов: {}", self.eff.tab_size)
-                    } else {
-                        "Tab".to_string()
-                    };
+                    if ui.button("⚙").clicked() { self.show_settings = true; }
+                    let ind = if self.eff.insert_spaces { format!("Пробелов: {}", self.eff.tab_size) } else { "Tab".to_string() };
                     ui.label(format!("{ind}   UTF-8"));
                 });
             });
@@ -1036,6 +1114,22 @@ impl App {
     }
 
     fn ui_terminal(&mut self, ctx: &egui::Context) {
+        if self.show_output {
+            egui::TopBottomPanel::bottom("output_panel")
+                .resizable(true)
+                .default_height(150.0)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("ВЫВОД").small().strong());
+                        if ui.small_button("Очистить").clicked() { self.output_log.clear(); }
+                        if ui.small_button("Скрыть").clicked() { self.show_output = false; }
+                    });
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                        ui.add(egui::Label::new(RichText::new(&self.output_log).monospace().small()).selectable(true));
+                    });
+                });
+        }
+
         if !self.show_terminal {
             self.term_focused = false;
             return;
@@ -1052,20 +1146,12 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("ТЕРМИНАЛ").small().strong());
                     for (i, t) in self.terminals.iter().enumerate() {
-                        if ui.selectable_label(i == self.term_active, &t.title).clicked() {
-                            self.term_active = i;
-                        }
-                        if ui.small_button("×").clicked() {
-                            close = Some(i);
-                        }
+                        if ui.selectable_label(i == self.term_active, &t.title).clicked() { self.term_active = i; }
+                        if ui.small_button("×").clicked() { close = Some(i); }
                     }
-                    if self.trusted && ui.small_button("+").on_hover_text("Новый терминал").clicked() {
-                        self.want_new_term = true;
-                    }
+                    if self.trusted && ui.small_button("+").clicked() { self.want_new_term = true; }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.small_button("Скрыть").clicked() {
-                            self.show_terminal = false;
-                        }
+                        if ui.small_button("Скрыть").clicked() { self.show_terminal = false; }
                     });
                 });
                 if let Some(i) = close {
@@ -1074,10 +1160,8 @@ impl App {
                     self.term_error = None;
                 }
                 if !self.trusted {
-                    ui.label("🛡 Терминал отключён в ограниченном режиме: он может выполнять код из этой папки.");
-                    if ui.button("Доверять папке…").clicked() {
-                        self.trust_prompt = true;
-                    }
+                    ui.label("🛡 Терминал отключён в ограниченном режиме.");
+                    if ui.button("Доверять папке…").clicked() { self.trust_prompt = true; }
                     self.term_focused = false;
                 } else if let Some(e) = self.term_error.clone() {
                     ui.colored_label(Color32::LIGHT_RED, e);
@@ -1099,35 +1183,27 @@ impl App {
     }
 
     fn ui_sidebar(&mut self, ctx: &egui::Context) {
-        if !self.show_side {
-            return;
-        }
-        egui::SidePanel::left("side")
-            .resizable(true)
-            .default_width(270.0)
-            .show(ctx, |ui| {
-                let n = match &self.git {
-                    Some(git::Status::Repo(s)) => s.files.len(),
-                    _ => 0,
-                };
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.side, Side::Explorer, "📂 Файлы");
-                    let t = if n > 0 { format!("Git ({n})") } else { "Git".to_string() };
-                    ui.selectable_value(&mut self.side, Side::Git, t);
-                });
-                ui.separator();
-                match self.side {
-                    Side::Explorer => self.explorer_ui(ui),
-                    Side::Git => self.git_ui(ui),
-                }
+        if !self.show_side { return; }
+        egui::SidePanel::left("side").resizable(true).default_width(270.0).show(ctx, |ui| {
+            let n = match &self.git {
+                Some(git::Status::Repo(s)) => s.files.len(),
+                _ => 0,
+            };
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.side, Side::Explorer, "📂 Файлы");
+                let t = if n > 0 { format!("Git ({n})") } else { "Git".to_string() };
+                ui.selectable_value(&mut self.side, Side::Git, t);
             });
+            ui.separator();
+            match self.side {
+                Side::Explorer => self.explorer_ui(ui),
+                Side::Git => self.git_ui(ui),
+            }
+        });
     }
 
     fn ui_central(&mut self, ctx: &egui::Context) {
-        let bg = self
-            .themes
-            .themes
-            .get(&self.eff.theme)
+        let bg = self.themes.themes.get(&self.eff.theme)
             .and_then(|t| t.settings.background)
             .map(|c| Color32::from_rgb(c.r, c.g, c.b))
             .unwrap_or(ctx.style().visuals.panel_fill);
@@ -1135,24 +1211,19 @@ impl App {
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             let mut close = None;
             let mut activate = None;
-            ui.horizontal_wrapped(|ui| {
-                for (i, t) in self.tabs.iter().enumerate() {
-                    let label = if t.dirty { format!("{} ●", t.title) } else { t.title.clone() };
-                    if ui.selectable_label(i == self.active, label).clicked() {
-                        activate = Some(i);
+
+            egui::ScrollArea::horizontal().id_salt("tabs_scroll").show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (i, t) in self.tabs.iter().enumerate() {
+                        let label = if t.dirty { format!("{} ●", t.title) } else { t.title.clone() };
+                        if ui.selectable_label(i == self.active, label).clicked() { activate = Some(i); }
+                        if ui.small_button("×").clicked() { close = Some(i); }
+                        ui.add_space(4.0);
                     }
-                    if ui.small_button("×").clicked() {
-                        close = Some(i);
-                    }
-                    ui.add_space(4.0);
-                }
+                });
             });
-            if let Some(i) = activate {
-                self.active = i;
-            }
-            if let Some(i) = close {
-                self.request_close(i);
-            }
+            if let Some(i) = activate { self.active = i; }
+            if let Some(i) = close { self.request_close(i); }
             ui.separator();
             if self.tabs.is_empty() {
                 self.welcome_ui(ui);
@@ -1167,68 +1238,226 @@ impl App {
         ui.vertical_centered(|ui| {
             ui.add_space(60.0);
             ui.heading("RustCode");
-            ui.label("Лёгкая IDE на Rust");
+            ui.label("Легковесная IDE для повседневных задач (под лицензией MIT)");
             ui.add_space(16.0);
             if ui.button("Открыть папку…").clicked() {
-                if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                    self.set_root(p);
-                }
+                if let Some(p) = rfd::FileDialog::new().pick_folder() { self.set_root(p); }
             }
             if ui.button("Открыть файл…").clicked() {
-                if let Some(p) = rfd::FileDialog::new().pick_file() {
-                    self.open_file(p);
-                }
+                if let Some(p) = rfd::FileDialog::new().pick_file() { self.open_file(p); }
             }
             ui.add_space(16.0);
-            ui.label("Ctrl+S сохранить · Ctrl+B панель · Ctrl+` терминал · Ctrl+Shift+G git · Ctrl+, настройки");
+            ui.label("F1 О программе · F2 Настройки · F5 Запуск · F7 Сборка · Ctrl+F Поиск");
         });
     }
 
     fn editor_ui(&mut self, ui: &mut egui::Ui) {
         let eff = self.eff.clone();
-        let theme: &Theme = self
-            .themes
-            .themes
-            .get(&eff.theme)
+        let theme: &Theme = self.themes.themes.get(&eff.theme)
             .or_else(|| self.themes.themes.get("base16-ocean.dark"))
             .unwrap_or_else(|| self.themes.themes.values().next().unwrap());
-        let fg = theme
-            .settings
-            .foreground
-            .map(|c| Color32::from_rgb(c.r, c.g, c.b))
-            .unwrap_or(Color32::LIGHT_GRAY);
+        let fg = theme.settings.foreground.map(|c| Color32::from_rgb(c.r, c.g, c.b)).unwrap_or(Color32::LIGHT_GRAY);
         let ss = &self.ss;
         let tab = &mut self.tabs[self.active];
 
         let font = FontId::monospace(eff.font_size);
         let (cw, rh) = ui.fonts(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
-        let Tab { uid, text, dirty, readonly, last_edit, hl, gkey, galley, ext, .. } = tab;
+        let Tab { uid, text, dirty, readonly, last_edit, hl, gkey, galley, ext, path, .. } = tab;
         let id = egui::Id::new(("editor", *uid));
         let ctx = ui.ctx().clone();
 
-        // Tab → пробелы, Enter → автоотступ
-        if !*readonly && ctx.memory(|m| m.has_focus(id)) {
-            if eff.insert_spaces && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Tab)) {
-                if let Some((a, b)) = cursor_range(&ctx, id) {
-                    replace_range(&ctx, id, text, a, b, &" ".repeat(eff.tab_size.max(1)));
-                    *dirty = true;
-                    *last_edit = Instant::now();
+        // Восстанавливаем позицию курсора, если это первый кадр после запуска
+        if self.restoring_cursors {
+            if let Some(p) = path {
+                let p_str = p.to_string_lossy().to_string();
+                if let Some(&char_idx) = self.session.cursors.get(&p_str) {
+                    if let Some(mut st) = egui::TextEdit::load_state(&ctx, id) {
+                        st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(char_idx))));
+                        st.store(&ctx, id);
+                    } else {
+                        let mut st = egui::TextEdit::load_state(&ctx, id).unwrap_or_default();
+                        st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(char_idx))));
+                        st.store(&ctx, id);
+                    }
                 }
-            } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+            }
+        }
+
+        // Сохраняем позицию курсора в сессию
+        if let Some((a, _)) = cursor_range(&ctx, id) {
+            if let Some(p) = path {
+                self.session.cursors.insert(p.to_string_lossy().to_string(), a);
+            }
+        }
+
+        // --- Обработка автодополнения ---
+        if self.autocomplete_open {
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowDown)) {
+                self.autocomplete_idx = (self.autocomplete_idx + 1) % self.autocomplete_suggestions.len();
+            }
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowUp)) {
+                if self.autocomplete_idx == 0 { self.autocomplete_idx = self.autocomplete_suggestions.len() - 1; }
+                else { self.autocomplete_idx -= 1; }
+            }
+            let accept = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter) || i.consume_key(Modifiers::NONE, Key::Tab));
+            if accept {
+                if let Some(sug) = self.autocomplete_suggestions.get(self.autocomplete_idx) {
+                    if let Some((a, _b)) = cursor_range(&ctx, id) {
+                        replace_range(&ctx, id, text, self.autocomplete_start_char, a, sug);
+                        *dirty = true;
+                        *last_edit = Instant::now();
+                    }
+                }
+                self.autocomplete_open = false;
+            }
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+                self.autocomplete_open = false;
+            }
+        }
+
+        // Автозакрытие скобок
+        if !*readonly && ctx.memory(|m| m.has_focus(id)) {
+            if let Some((a, b)) = cursor_range(&ctx, id) {
+                let mut consume_event = false;
+                let mut insert_text = None;
+                let mut move_right = false;
+
+                ctx.input(|i| {
+                    for ev in &i.events {
+                        if let egui::Event::Text(t) = ev {
+                            let open = match t.as_str() { "(" => Some(")"), "{" => Some("}"), "[" => Some("]"), "<" => Some(">"), _ => None };
+                            if let Some(close) = open {
+                                insert_text = Some(format!("{}{}", t, close));
+                                consume_event = true;
+                            } else if let Some(next_c) = text.chars().nth(a) {
+                                if (t == ")" && next_c == ')') || (t == "}" && next_c == '}') ||
+                                   (t == "]" && next_c == ']') || (t == ">" && next_c == '>') {
+                                    move_right = true;
+                                    consume_event = true;
+                                }
+                            }
+                        }
+                    }
+                });
+
+                if consume_event {
+                    ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(_))));
+                    if let Some(ins) = insert_text {
+                        replace_range(&ctx, id, text, a, b, &ins);
+                        let mut st = egui::TextEdit::load_state(&ctx, id).unwrap_or_default();
+                        st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(a + 1))));
+                        st.store(&ctx, id);
+                        *dirty = true;
+                    } else if move_right {
+                        let mut st = egui::TextEdit::load_state(&ctx, id).unwrap_or_default();
+                        st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(a + 1))));
+                        st.store(&ctx, id);
+                    }
+                }
+            }
+        }
+
+        // Tab, Shift+Tab и Enter
+        if !*readonly && ctx.memory(|m| m.has_focus(id)) && !self.autocomplete_open {
+            if ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::Tab)) {
+                if let Some((a, b)) = cursor_range(&ctx, id) {
+                    let indent_str = if eff.insert_spaces { " ".repeat(eff.tab_size.max(1)) } else { "\t".to_string() };
+                    let indent_chars = indent_str.chars().count();
+
+                    // Находим начало первой выделенной строки
+                    let ba = byte_idx(text, a);
+                    let line_start_byte = text[..ba].rfind('\n').map(|i| i + 1).unwrap_or(0);
+                    let bb = byte_idx(text, b);
+
+                    let block = &text[line_start_byte..bb];
+                    let mut new_block = String::with_capacity(block.len());
+                    let mut removed_first = 0;
+                    let mut total_removed = 0;
+
+                    for (idx, line) in block.split_inclusive('\n').enumerate() {
+                        if let Some(stripped) = line.strip_prefix(&indent_str) {
+                            new_block.push_str(stripped);
+                            if idx == 0 { removed_first = indent_chars; }
+                            total_removed += indent_chars;
+                        } else if line.starts_with('\t') || line.starts_with(' ') {
+                            // Если отступ меньше стандартного, убираем доступные пробелы/таб
+                            let space_count = line.chars().take(indent_chars).take_while(|c| *c == ' ' || *c == '\t').count();
+                            let skip_bytes = byte_idx(line, space_count);
+                            new_block.push_str(&line[skip_bytes..]);
+                            if idx == 0 { removed_first = space_count; }
+                            total_removed += space_count;
+                        } else {
+                            new_block.push_str(line);
+                        }
+                    }
+
+                    if total_removed > 0 {
+                        text.replace_range(line_start_byte..bb, &new_block);
+                        if let Some(mut st) = egui::TextEdit::load_state(&ctx, id) {
+                            let new_a = a.saturating_sub(removed_first);
+                            let new_b = b.saturating_sub(total_removed);
+                            if a == b {
+                                st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(new_a))));
+                            } else {
+                                st.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(new_a), CCursor::new(new_b))));
+                            }
+                            st.store(&ctx, id);
+                        }
+                        *dirty = true;
+                        *last_edit = Instant::now();
+                    }
+                }
+            }
+            else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Tab)) {
+                if let Some((a, b)) = cursor_range(&ctx, id) {
+                    let indent_str = if eff.insert_spaces { " ".repeat(eff.tab_size.max(1)) } else { "\t".to_string() };
+                    let indent_chars = indent_str.chars().count();
+
+                    if a != b {
+                        // Если есть выделение — сдвигаем все затронутые строки вправо
+                        let ba = byte_idx(text, a);
+                        let line_start_byte = text[..ba].rfind('\n').map(|i| i + 1).unwrap_or(0);
+                        let bb = byte_idx(text, b);
+
+                        let block = &text[line_start_byte..bb];
+                        let mut new_block = String::with_capacity(block.len() + 32);
+                        let mut lines_count = 0;
+
+                        for line in block.split_inclusive('\n') {
+                            new_block.push_str(&indent_str);
+                            new_block.push_str(line);
+                            lines_count += 1;
+                        }
+
+                        text.replace_range(line_start_byte..bb, &new_block);
+
+                        // Восстанавливаем выделение с учетом добавленных отступов
+                        if let Some(mut st) = egui::TextEdit::load_state(&ctx, id) {
+                            let new_a = a + indent_chars;
+                            let new_b = b + indent_chars * lines_count;
+                            st.cursor.set_char_range(Some(CCursorRange::two(
+                                CCursor::new(new_a),
+                                CCursor::new(new_b),
+                            )));
+                            st.store(&ctx, id);
+                        }
+                        *dirty = true;
+                        *last_edit = Instant::now();
+                    } else if eff.insert_spaces {
+                        // Если ничего не выделено — просто вставляем пробелы
+                        replace_range(&ctx, id, text, a, b, &indent_str);
+                        *dirty = true;
+                        *last_edit = Instant::now();
+                    }
+                }
+            }
+            else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
                 if let Some((a, b)) = cursor_range(&ctx, id) {
                     let before = &text[..byte_idx(text, a)];
                     let line = before.rsplit('\n').next().unwrap_or("");
                     let indent: String = line.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
                     let opens = line.trim_end().ends_with(|c: char| matches!(c, '{' | '(' | '[' | ':'));
-                    let extra = if opens {
-                        if eff.insert_spaces {
-                            " ".repeat(eff.tab_size.max(1))
-                        } else {
-                            "\t".to_string()
-                        }
-                    } else {
-                        String::new()
-                    };
+                    let extra = if opens { if eff.insert_spaces { " ".repeat(eff.tab_size.max(1)) } else { "\t".to_string() } } else { String::new() };
                     let ins = format!("\n{indent}{extra}");
                     replace_range(&ctx, id, text, a, b, &ins);
                     *dirty = true;
@@ -1237,7 +1466,7 @@ impl App {
             }
         }
 
-        // Кэш раскладки: пересчёт только если изменился текст/параметры
+
         let mut layouter = |ui: &egui::Ui, t: &str, wrap: f32| -> Arc<egui::Galley> {
             let wrap = if eff.word_wrap { wrap } else { f32::INFINITY };
             let mut h = DefaultHasher::new();
@@ -1249,12 +1478,9 @@ impl App {
             ui.ctx().pixels_per_point().to_bits().hash(&mut h);
             let k = h.finish();
             if *gkey == k {
-                if let Some(g) = galley.as_ref() {
-                    return g.clone();
-                }
+                if let Some(g) = galley.as_ref() { return g.clone(); }
             }
             let mut job = if t.len() > 1_500_000 {
-                // огромные файлы — без подсветки
                 let mut j = LayoutJob::default();
                 j.append(t, 0.0, TextFormat { font_id: font.clone(), color: fg, ..Default::default() });
                 j
@@ -1278,14 +1504,10 @@ impl App {
         let buf: &mut dyn egui::TextBuffer = if ro_flag { &mut ro } else { text };
 
         let sa = if eff.word_wrap { egui::ScrollArea::vertical() } else { egui::ScrollArea::both() };
-        sa.auto_shrink([false, false]).show(ui, |ui| {
+        let out = sa.auto_shrink([false, false]).show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
-                let gutter = if eff.line_numbers {
-                    Some(ui.allocate_exact_size(vec2(gw, 1.0), Sense::hover()).0)
-                } else {
-                    None
-                };
+                let gutter = if eff.line_numbers { Some(ui.allocate_exact_size(vec2(gw, 1.0), Sense::hover()).0) } else { None };
                 let width = if eff.word_wrap { ui.available_width() } else { f32::INFINITY };
                 let out = egui::TextEdit::multiline(buf)
                     .id(id)
@@ -1295,9 +1517,18 @@ impl App {
                     .desired_rows(rows)
                     .layouter(&mut layouter)
                     .show(ui);
-                if out.response.changed() {
-                    changed = true;
+                if out.response.changed() { changed = true; }
+
+                // --- ПРОКРУТКА ВНУТРИ ScrollArea ---
+                if let Some(target_char) = self.scroll_to_char.take() {
+                    let cur = out.galley.from_ccursor(CCursor::new(target_char));
+                    let cursor_rect = out.galley.pos_from_cursor(&cur);
+                    let target_rect = cursor_rect
+                        .translate(out.galley_pos.to_vec2())
+                        .expand2(vec2(20.0, 80.0));
+                    ui.scroll_to_rect(target_rect, Some(Align::Center));
                 }
+
                 if let Some(gr) = gutter {
                     let painter = ui.painter();
                     let clip = ui.clip_rect();
@@ -1308,281 +1539,467 @@ impl App {
                         let y = out.galley_pos.y + row.rect.min.y;
                         if newline {
                             if y + rh >= clip.min.y && y <= clip.max.y {
-                                painter.text(
-                                    pos2(gr.max.x - 6.0, y),
-                                    Align2::RIGHT_TOP,
-                                    n.to_string(),
-                                    font.clone(),
-                                    col,
-                                );
+                                painter.text(pos2(gr.max.x - 6.0, y), Align2::RIGHT_TOP, n.to_string(), font.clone(), col);
                             }
                             n += 1;
                         }
                         newline = row.ends_with_newline;
-                        if y > clip.max.y {
-                            break;
-                        }
+                        if y > clip.max.y { break; }
                     }
                 }
-            });
+                out
+            }).inner
         });
+
         if changed {
             *dirty = true;
             *last_edit = Instant::now();
+
+            if let Some((a, _)) = cursor_range(&ctx, id) {
+                let byte_a = byte_idx(text, a);
+                let text_before = &text[..byte_a];
+                let byte_start = text_before
+                    .char_indices()
+                    .rev()
+                    .find(|&(_, c)| !c.is_alphanumeric() && c != '_')
+                    .map(|(i, c)| i + c.len_utf8())
+                    .unwrap_or(0);
+
+                let current_word = &text[byte_start..byte_a];
+                if current_word.len() >= 3 {
+                    self.autocomplete_suggestions = self.all_suggestions.iter()
+                        .filter(|s| s.starts_with(current_word) && s.as_str() != current_word)
+                        .cloned().collect();
+                    if !self.autocomplete_suggestions.is_empty() {
+                        self.autocomplete_open = true;
+                        self.autocomplete_idx = 0;
+                        self.autocomplete_start_char = text[..byte_start].chars().count();
+                    } else {
+                        self.autocomplete_open = false;
+                    }
+                } else {
+                    self.autocomplete_open = false;
+                }
+            }
+        }
+
+                if self.autocomplete_open && !self.autocomplete_suggestions.is_empty() {
+                    if let Some((a, _)) = cursor_range(&ctx, id) {
+                        let cur = out.inner.galley.from_ccursor(CCursor::new(a));
+                        let cursor_rect = out.inner.galley.pos_from_cursor(&cur);
+                        let popup_pos = out.inner.galley_pos + cursor_rect.left_bottom().to_vec2();
+
+                        let mut selected_sug = None;
+                        egui::Area::new("autocomplete_popup".into())
+
+                    .fixed_pos(popup_pos)
+                    .order(egui::Order::Foreground)
+                    .show(&ctx, |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.set_max_width(200.0);
+                            ui.set_max_height(150.0);
+                            egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
+                                for (i, sug) in self.autocomplete_suggestions.iter().enumerate() {
+                                    if ui.selectable_label(i == self.autocomplete_idx, sug).clicked() {
+                                        selected_sug = Some(sug.clone());
+                                    }
+                                }
+                            });
+                        });
+                    });
+
+                if let Some(sug) = selected_sug {
+                    replace_range(&ctx, id, text, self.autocomplete_start_char, a, &sug);
+                    *dirty = true;
+                    *last_edit = Instant::now();
+                    self.autocomplete_open = false;
+                }
+            }
+        }
+
+        if let Some(target_char) = self.scroll_to_char.take() {
+            let cur = out.inner.galley.from_ccursor(CCursor::new(target_char));
+            let cursor_rect = out.inner.galley.pos_from_cursor(&cur);
+            let target_rect = cursor_rect
+                .translate(out.inner.galley_pos.to_vec2())
+                .expand2(vec2(20.0, 80.0));
+            ui.scroll_to_rect(target_rect, Some(Align::Center));
+        }
+
+        if self.show_find && !self.find_text.is_empty() {
+            let painter = ui.painter_at(out.inner_rect);
+            let active_range = cursor_range(&ctx, id);
+            let search_len = self.find_text.chars().count();
+
+            for (byte_pos, _) in text.match_indices(&self.find_text) {
+                let start_c = text[..byte_pos].chars().count();
+                let end_c = start_c + search_len;
+
+                let c1 = out.inner.galley.from_ccursor(CCursor::new(start_c));
+                let c2 = out.inner.galley.from_ccursor(CCursor::new(end_c));
+                let r1 = out.inner.galley.pos_from_cursor(&c1);
+                let r2 = out.inner.galley.pos_from_cursor(&c2);
+
+                let rect = egui::Rect::from_min_max(
+                    out.inner.galley_pos + r1.min.to_vec2(),
+                    out.inner.galley_pos + r2.max.to_vec2(),
+                );
+
+                let is_current = active_range == Some((start_c, end_c));
+                let fill = if is_current {
+                    Color32::from_rgba_unmultiplied(255, 165, 0, 110)
+                } else {
+                    Color32::from_rgba_unmultiplied(255, 230, 0, 45)
+                };
+                painter.rect_filled(rect, 2.0, fill);
+            }
         }
     }
-
-    // ───────── диалоги ─────────
 
     fn ui_dialogs(&mut self, ctx: &egui::Context) {
         self.dialog_trust(ctx);
         self.dialog_settings(ctx);
 
-        // закрытие вкладки с несохранёнными изменениями
+        if self.show_about {
+            egui::Window::new("О программе").open(&mut self.show_about).show(ctx, |ui| {
+                ui.label(RichText::new("RustCode v0.3.0").strong());
+                ui.label("Легковесная среда разработки на Rust + egui.");
+                ui.label("Идея взята с моих прошлых проектов на C++ и Python.");
+                ui.label("Поддерживает такие языки как: Python, C++, C#, Go и Rust");
+            });
+        }
+
+        if self.show_github {
+            egui::Window::new("GitHub").open(&mut self.show_github).show(ctx, |ui| {
+                ui.label(RichText::new("Сейчас откроеться бразуер...").strong());
+                ui.label("Сейчас откроеться браузер с GitHub'ом, ожидайте...");
+            });
+
+            self.show_github = false;
+
+            let url = "https://github.com/K1sh-M1sh-Studio/RustCode";
+            if let Err(e) = open::that(url) {
+                eprintln!("Не удалось открыть сайт GitHub");
+            }
+        }
+
+        if self.show_plugins {
+            egui::Window::new("Магазин плагинов").open(&mut self.show_plugins).show(ctx, |_ui| {
+                let _langs = vec!["Будет не много позже"];
+            });
+        }
+
+        if self.show_find {
+            egui::Window::new("Поиск и замена").open(&mut self.show_find).show(ctx, |ui| {
+                let mut trigger_find = false;
+
+                ui.horizontal(|ui| {
+                    ui.label("Найти:");
+                    let r = ui.text_edit_singleline(&mut self.find_text);
+                    if self.focus_find {
+                        r.request_focus();
+                        self.focus_find = false;
+                    }
+                    // Поиск по нажатию Enter в поле "Найти"
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        trigger_find = true;
+                        r.request_focus(); // Возвращаем фокус обратно в поле, чтобы можно было жать Enter снова
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Заменить:");
+                    ui.text_edit_singleline(&mut self.replace_text);
+                });
+
+                ui.horizontal(|ui| {
+                    if ui.button("Найти далее").clicked() {
+                        trigger_find = true;
+                    }
+
+                    if trigger_find && !self.find_text.is_empty() {
+                        if let Some(tab) = self.tabs.get(self.active) {
+                            let id = egui::Id::new(("editor", tab.uid));
+                            let start_char = cursor_range(ctx, id).map(|(_, end)| end).unwrap_or(0);
+                            let start_byte = byte_idx(&tab.text, start_char);
+
+                            let found_byte = tab.text[start_byte..]
+                                .find(&self.find_text)
+                                .map(|pos| start_byte + pos)
+                                .or_else(|| tab.text.find(&self.find_text));
+
+                            if let Some(byte_pos) = found_byte {
+                                let sel_start = tab.text[..byte_pos].chars().count();
+                                let sel_end = sel_start + self.find_text.chars().count();
+
+                                if let Some(mut st) = egui::TextEdit::load_state(ctx, id) {
+                                    st.cursor.set_char_range(Some(CCursorRange::two(
+                                        CCursor::new(sel_end),
+                                        CCursor::new(sel_start),
+                                    )));
+                                    st.store(ctx, id);
+                                }
+                                // Даем команду редактору прокрутиться к этой позиции
+                                self.scroll_to_char = Some(sel_start);
+                                self.status = "Совпадение найдено".into();
+                            } else {
+                                self.status = "Ничего не найдено".into();
+                            }
+                        }
+                    }
+
+                    if ui.button("Заменить").clicked() && !self.find_text.is_empty() {
+                        if let Some(tab) = self.tabs.get_mut(self.active) {
+                            let id = egui::Id::new(("editor", tab.uid));
+                            if let Some((a, b)) = cursor_range(ctx, id) {
+                                let ba = byte_idx(&tab.text, a);
+                                let bb = byte_idx(&tab.text, b);
+                                if &tab.text[ba..bb] == self.find_text {
+                                    replace_range(ctx, id, &mut tab.text, a, b, &self.replace_text);
+                                    tab.dirty = true;
+                                    tab.last_edit = Instant::now();
+                                }
+                            }
+                        }
+                    }
+
+                    if ui.button("Заменить всё").clicked() && !self.find_text.is_empty() {
+                        if let Some(tab) = self.tabs.get_mut(self.active) {
+                            let count = tab.text.matches(&self.find_text).count();
+                            if count > 0 {
+                                tab.text = tab.text.replace(&self.find_text, &self.replace_text);
+                                tab.dirty = true;
+                                tab.last_edit = Instant::now();
+                                self.status = format!("Заменено совпадений: {count}");
+                            }
+                        }
+                    }
+                });
+            });
+        }
+
+        if self.show_goto {
+            let mut open = self.show_goto;
+            let mut should_goto = false;
+            egui::Window::new("Перейти к строке").open(&mut open).show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Строка:");
+                    let r = ui.add(egui::DragValue::new(&mut self.goto_line).range(1..=usize::MAX));
+                    if self.focus_goto {
+                        r.request_focus();
+                        self.focus_goto = false;
+                    }
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        should_goto = true;
+                    }
+                });
+                if ui.button("Перейти").clicked() {
+                    should_goto = true;
+                }
+            });
+            if should_goto {
+                if let Some(tab) = self.tabs.get(self.active) {
+                    let id = egui::Id::new(("editor", tab.uid));
+                    let mut count = 1;
+                    let mut byte_pos = 0;
+                    for (b, c) in tab.text.char_indices() {
+                        if c == '\n' { count += 1; }
+                        if count == self.goto_line {
+                            byte_pos = if b == 0 { 0 } else { b + 1 };
+                            break;
+                        }
+                    }
+                    let char_idx = tab.text[..byte_pos].chars().count();
+                    if let Some(mut st) = egui::TextEdit::load_state(ctx, id) {
+                        st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(char_idx))));
+                        st.store(ctx, id);
+                        // Возвращаем фокус в редактор после перехода к строке
+                        ctx.memory_mut(|m| m.request_focus(id));
+                    }
+                }
+                self.show_goto = false;
+            } else if !open {
+                self.show_goto = false;
+            }
+        }
+
+        if self.show_goto {
+            let mut open = self.show_goto;
+            let mut should_goto = false;
+            egui::Window::new("Перейти к строке").open(&mut open).show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Строка:");
+                    ui.add(egui::DragValue::new(&mut self.goto_line));
+                });
+                if ui.button("Перейти").clicked() {
+                    should_goto = true;
+                }
+            });
+            if should_goto {
+                if let Some(tab) = self.tabs.get(self.active) {
+                    let id = egui::Id::new(("editor", tab.uid));
+                    let mut count = 1;
+                    let mut byte_pos = 0;
+                    for (b, c) in tab.text.char_indices() {
+                        if c == '\n' { count += 1; }
+                        if count == self.goto_line { byte_pos = b; break; }
+                    }
+                    let char_idx = tab.text[..byte_pos].chars().count();
+                    if let Some(mut st) = egui::TextEdit::load_state(ctx, id) {
+                        st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(char_idx))));
+                        st.store(ctx, id);
+                    }
+                }
+                self.show_goto = false;
+            } else if !open {
+                self.show_goto = false;
+            }
+        }
+
         if let Some(i) = self.confirm_close {
             let (mut save, mut discard, mut cancel) = (false, false, false);
             let title = self.tabs.get(i).map(|t| t.title.clone()).unwrap_or_default();
-            egui::Window::new("Несохранённые изменения")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    ui.label(format!("Сохранить изменения в «{title}»?"));
-                    ui.horizontal(|ui| {
-                        save = ui.button("Сохранить").clicked();
-                        discard = ui.button("Не сохранять").clicked();
-                        cancel = ui.button("Отмена").clicked();
-                    });
+            egui::Window::new("Несохранённые изменения").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                ui.label(format!("Сохранить изменения в «{title}»?"));
+                ui.horizontal(|ui| {
+                    save = ui.button("Сохранить").clicked();
+                    discard = ui.button("Не сохранять").clicked();
+                    cancel = ui.button("Отмена").clicked();
                 });
-            if save {
-                self.save_tab(i);
-                if !self.tabs.get(i).map(|t| t.dirty).unwrap_or(false) {
-                    self.close_tab(i);
-                }
-                self.confirm_close = None;
-            } else if discard {
-                self.close_tab(i);
-                self.confirm_close = None;
-            } else if cancel {
-                self.confirm_close = None;
-            }
+            });
+            if save { self.save_tab(i); if !self.tabs.get(i).map(|t| t.dirty).unwrap_or(false) { self.close_tab(i); } self.confirm_close = None; }
+            else if discard { self.close_tab(i); self.confirm_close = None; }
+            else if cancel { self.confirm_close = None; }
         }
 
-        // откат изменений в git
         if let Some((f, top)) = self.confirm_discard.clone() {
             let (mut yes, mut no) = (false, false);
-            egui::Window::new("Отменить изменения?")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    ui.label(format!("Изменения в «{}» будут потеряны безвозвратно.", f.path));
-                    ui.horizontal(|ui| {
-                        yes = ui.button("Да, откатить").clicked();
-                        no = ui.button("Отмена").clicked();
-                    });
-                });
+            egui::Window::new("Отменить изменения?").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                ui.label(format!("Изменения в «{}» будут потеряны.", f.path));
+                ui.horizontal(|ui| { yes = ui.button("Да").clicked(); no = ui.button("Отмена").clicked(); });
+            });
             if yes {
-                let args: Vec<String> = if f.untracked() {
-                    vec!["clean".into(), "-f".into(), "--".into(), f.path.clone()]
-                } else {
-                    vec!["restore".into(), "--".into(), f.path.clone()]
-                };
+                let args: Vec<String> = if f.untracked() { vec!["clean".into(), "-f".into(), "--".into(), f.path.clone()] }
+                else { vec!["restore".into(), "--".into(), f.path.clone()] };
                 self.confirm_discard = None;
                 self.run_git_act(ctx, GitAct::Op { label: "discard".into(), args, top });
-            } else if no {
-                self.confirm_discard = None;
-            }
+            } else if no { self.confirm_discard = None; }
         }
 
-        // новый файл / папка
         let (mut create, mut cancel) = (false, false);
         if let Some((dir, is_dir, name)) = self.new_entry.as_mut() {
             let title = if *is_dir { "Новая папка" } else { "Новый файл" };
-            egui::Window::new(title)
-                .collapsible(false)
-                .resizable(false)
-                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    ui.label(dir.display().to_string());
-                    let r = ui.text_edit_singleline(name);
-                    r.request_focus();
-                    if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                        create = true;
-                    }
-                    ui.horizontal(|ui| {
-                        if ui.button("Создать").clicked() {
-                            create = true;
-                        }
-                        if ui.button("Отмена").clicked() {
-                            cancel = true;
-                        }
-                    });
+            egui::Window::new(title).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                ui.label(dir.display().to_string());
+                let r = ui.text_edit_singleline(name);
+                r.request_focus();
+                if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) { create = true; }
+                ui.horizontal(|ui| {
+                    if ui.button("Создать").clicked() { create = true; }
+                    if ui.button("Отмена").clicked() { cancel = true; }
                 });
+            });
         }
-        if create {
-            if let Some((dir, is_dir, name)) = self.new_entry.take() {
-                self.create_entry(dir, is_dir, &name);
-            }
-        } else if cancel {
-            self.new_entry = None;
-        }
+        if create { if let Some((dir, is_dir, name)) = self.new_entry.take() { self.create_entry(dir, is_dir, &name); } }
+        else if cancel { self.new_entry = None; }
     }
 
     fn dialog_trust(&mut self, ctx: &egui::Context) {
-        if !self.trust_prompt {
-            return;
-        }
-        let Some(root) = self.root.clone() else {
-            self.trust_prompt = false;
-            return;
-        };
-        let parent_name = root
-            .parent()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| root.display().to_string());
+        if !self.trust_prompt { return; }
+        let Some(root) = self.root.clone() else { self.trust_prompt = false; return; };
         let (mut yes, mut no) = (false, false);
-        egui::Window::new("🛡 Вы доверяете авторам файлов в этой папке?")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.set_max_width(460.0);
-                ui.label(RichText::new(root.display().to_string()).monospace());
-                ui.add_space(6.0);
-                ui.label(
-                    "Редактор может запускать терминал и git и применять настройки проекта — \
-                     всё это способно выполнять код из файлов папки. Доверяйте, только если знаете автора.",
-                );
-                ui.add_space(4.0);
-                ui.label(
-                    "В ограниченном режиме файлы можно читать и править, но терминал, git и \
-                     настройки проекта отключены.",
-                );
-                ui.add_space(6.0);
-                ui.checkbox(&mut self.trust_parent, format!("Доверять всем папкам внутри «{parent_name}»"));
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    yes = ui.button("✔ Да, я доверяю авторам").clicked();
-                    no = ui.button("✖ Нет, ограниченный режим").clicked();
-                });
+        egui::Window::new("🛡 Доверие папке").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+            ui.set_max_width(460.0);
+            ui.label(RichText::new(root.display().to_string()).monospace());
+            ui.label("Разрешить редактирование и выполнение кода?");
+            ui.checkbox(&mut self.trust_parent, "Доверять всем вложенным папкам");
+            ui.horizontal(|ui| {
+                yes = ui.button("✔ Доверять").clicked();
+                no = ui.button("✖ Ограниченный режим").clicked();
             });
+        });
         if yes {
-            let target = if self.trust_parent {
-                root.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| root.clone())
-            } else {
-                root.clone()
-            };
+            let target = if self.trust_parent { root.parent().unwrap_or(&root).to_path_buf() } else { root };
             self.trust.add(&target);
             self.trusted = true;
             self.trust_prompt = false;
             self.load_project();
             self.recompute();
             self.git_dirty = true;
-        } else if no {
-            self.trust_prompt = false;
-        }
+            for tab in &mut self.tabs { tab.readonly = false; }
+        } else if no { self.trust_prompt = false; }
     }
 
     fn dialog_settings(&mut self, ctx: &egui::Context) {
-        if !self.show_settings {
-            return;
-        }
+        if !self.show_settings { return; }
         let mut open = true;
         let mut changed = false;
         let mut pchanged = false;
         let theme_names: Vec<String> = self.themes.themes.keys().cloned().collect();
-        let has_project = self.root.is_some() && self.trusted;
-        egui::Window::new("⚙ Настройки")
-            .open(&mut open)
-            .default_width(460.0)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.settings_tab, 0, "Пользователь");
-                    ui.add_enabled_ui(has_project, |ui| {
-                        ui.selectable_value(&mut self.settings_tab, 1, "Проект");
-                    });
-                });
-                ui.separator();
-                if self.settings_tab == 1 && has_project {
-                    let p = &mut self.project;
-                    ui.label("Переопределяют пользовательские настройки только для этой папки\n(.rustcode/settings.json).");
-                    pchanged |= opt_row(ui, "Размер табуляции", &mut p.tab_size, 4usize, |ui, v| {
-                        ui.add(egui::Slider::new(v, 1..=8)).changed()
-                    });
-                    pchanged |= opt_row(ui, "Пробелы вместо Tab", &mut p.insert_spaces, true, |ui, v| {
-                        ui.checkbox(v, "").changed()
-                    });
-                    pchanged |= opt_row(ui, "Перенос строк", &mut p.word_wrap, false, |ui, v| {
-                        ui.checkbox(v, "").changed()
-                    });
-                    pchanged |= opt_row(ui, "Убирать пробелы в конце строк", &mut p.trim_trailing_whitespace, true, |ui, v| {
-                        ui.checkbox(v, "").changed()
-                    });
-                    pchanged |= opt_row(ui, "Shell терминала", &mut p.terminal_shell, String::new(), |ui, v| {
-                        ui.text_edit_singleline(v).changed()
-                    });
-                    pchanged |= opt_row(
-                        ui,
-                        "Скрывать в проводнике",
-                        &mut p.explorer_exclude,
-                        vec![".git".to_string(), "target".to_string()],
-                        |ui, v| edit_list(ui, v),
-                    );
-                } else {
-                    let s = &mut self.user;
-                    changed |= ui.add(egui::Slider::new(&mut s.font_size, 9.0..=32.0).text("Размер шрифта")).changed();
-                    changed |= ui.add(egui::Slider::new(&mut s.tab_size, 1..=8).text("Размер табуляции")).changed();
-                    changed |= ui.checkbox(&mut s.insert_spaces, "Вставлять пробелы вместо Tab").changed();
-                    changed |= ui.checkbox(&mut s.word_wrap, "Перенос строк").changed();
-                    changed |= ui.checkbox(&mut s.line_numbers, "Номера строк").changed();
-                    changed |= ui.checkbox(&mut s.auto_save, "Автосохранение (через 1 с после правки)").changed();
-                    changed |= ui.checkbox(&mut s.trim_trailing_whitespace, "Убирать пробелы в конце строк при сохранении").changed();
-                    egui::ComboBox::from_label("Тема")
-                        .selected_text(s.theme.clone())
-                        .show_ui(ui, |ui| {
-                            for n in &theme_names {
-                                if ui.selectable_value(&mut s.theme, n.clone(), n).changed() {
-                                    changed = true;
-                                }
-                            }
-                        });
-                    ui.separator();
-                    changed |= ui
-                        .add(egui::Slider::new(&mut s.terminal_font_size, 9.0..=28.0).text("Шрифт терминала"))
-                        .changed();
-                    ui.horizontal(|ui| {
-                        ui.label("Shell терминала (пусто = по умолчанию):");
-                        changed |= ui.text_edit_singleline(&mut s.terminal_shell).changed();
-                    });
-                    changed |= ui
-                        .add(egui::Slider::new(&mut s.git_poll_secs, 1..=30).text("Опрос git, сек"))
-                        .changed();
-                    ui.label("Скрывать в проводнике (имя или маска *.ext):");
-                    changed |= edit_list(ui, &mut s.explorer_exclude);
-                }
+        let has_project = self.root.is_some();
+
+        egui::Window::new("⚙ Настройки").open(&mut open).default_width(460.0).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.settings_tab, 0, "Пользователь");
+                ui.add_enabled_ui(has_project, |ui| { ui.selectable_value(&mut self.settings_tab, 1, "Проект"); });
             });
+            ui.separator();
+            if self.settings_tab == 1 && has_project {
+                let p = &mut self.project;
+                pchanged |= opt_row(ui, "Размер табуляции", &mut p.tab_size, 4usize, |ui, v| ui.add(egui::Slider::new(v, 1..=8)).changed());
+                pchanged |= opt_row(ui, "Пробелы вместо Tab", &mut p.insert_spaces, true, |ui, v| ui.checkbox(v, "").changed());
+                pchanged |= opt_row(ui, "Перенос строк", &mut p.word_wrap, false, |ui, v| ui.checkbox(v, "").changed());
+                pchanged |= opt_row(ui, "Shell терминала", &mut p.terminal_shell, String::new(), |ui, v| ui.text_edit_singleline(v).changed());
+
+                ui.label("Команда сборки (F7):");
+                let mut build_cmd = p.build_command.clone().unwrap_or_default();
+                if ui.text_edit_singleline(&mut build_cmd).changed() { p.build_command = Some(build_cmd); pchanged = true; }
+
+                ui.label("Команда запуска (F5):");
+                let mut run_cmd = p.run_command.clone().unwrap_or_default();
+                if ui.text_edit_singleline(&mut run_cmd).changed() { p.run_command = Some(run_cmd); pchanged = true; }
+
+                if let Some(r) = &self.root {
+                    ui.separator();
+                    if self.trusted {
+                        if ui.button("🔓 Отозвать доверие").clicked() {
+                            self.trust.remove(r);
+                            self.trusted = false;
+                            for tab in &mut self.tabs { tab.readonly = true; }
+                        }
+                    } else {
+                        if ui.button("🔒 Доверять проекту").clicked() {
+                            self.trust.add(r);
+                            self.trusted = true;
+                            for tab in &mut self.tabs { tab.readonly = false; }
+                        }
+                    }
+                }
+            } else {
+                let s = &mut self.user;
+                changed |= ui.add(egui::Slider::new(&mut s.font_size, 9.0..=32.0).text("Размер шрифта")).changed();
+                changed |= ui.add(egui::Slider::new(&mut s.tab_size, 1..=8).text("Размер табуляции")).changed();
+                changed |= ui.checkbox(&mut s.insert_spaces, "Пробелы вместо Tab").changed();
+                changed |= ui.checkbox(&mut s.word_wrap, "Перенос строк").changed();
+                changed |= ui.checkbox(&mut s.line_numbers, "Номера строк").changed();
+                changed |= ui.checkbox(&mut s.auto_save, "Автосохранение").changed();
+                egui::ComboBox::from_label("Тема").selected_text(s.theme.clone()).show_ui(ui, |ui| {
+                    for n in &theme_names { if ui.selectable_value(&mut s.theme, n.clone(), n).changed() { changed = true; } }
+                });
+            }
+        });
         self.show_settings = open;
         if changed || pchanged {
             self.recompute();
             settings::save_json(&settings::user_settings_path(), &self.user);
             if pchanged {
-                if let Some(r) = &self.root {
-                    settings::save_json(&settings::project_settings_path(r), &self.project);
-                }
+                if let Some(r) = &self.root { settings::save_json(&settings::project_settings_path(r), &self.project); }
             }
         }
     }
 }
 
-/// Строка "переопределить настройку проекта": чекбокс + редактор значения.
-fn opt_row<T: Clone>(
-    ui: &mut egui::Ui,
-    label: &str,
-    opt: &mut Option<T>,
-    default: T,
-    mut edit: impl FnMut(&mut egui::Ui, &mut T) -> bool,
-) -> bool {
+fn opt_row<T: Clone>(ui: &mut egui::Ui, label: &str, opt: &mut Option<T>, default: T, mut edit: impl FnMut(&mut egui::Ui, &mut T) -> bool) -> bool {
     let mut ch = false;
     ui.horizontal(|ui| {
         let mut on = opt.is_some();
@@ -1590,38 +2007,8 @@ fn opt_row<T: Clone>(
             *opt = if on { Some(default.clone()) } else { None };
             ch = true;
         }
-        if let Some(v) = opt.as_mut() {
-            if edit(ui, v) {
-                ch = true;
-            }
-        }
+        if let Some(v) = opt.as_mut() { if edit(ui, v) { ch = true; } }
     });
-    ch
-}
-
-fn edit_list(ui: &mut egui::Ui, v: &mut Vec<String>) -> bool {
-    let mut ch = false;
-    let mut del = None;
-    ui.vertical(|ui| {
-        for (i, s) in v.iter_mut().enumerate() {
-            ui.horizontal(|ui| {
-                if ui.text_edit_singleline(s).changed() {
-                    ch = true;
-                }
-                if ui.small_button("×").clicked() {
-                    del = Some(i);
-                }
-            });
-        }
-        if ui.small_button("+ добавить").clicked() {
-            v.push(String::new());
-            ch = true;
-        }
-    });
-    if let Some(i) = del {
-        v.remove(i);
-        ch = true;
-    }
     ch
 }
 
@@ -1633,6 +2020,14 @@ impl eframe::App for App {
         self.autosave();
         self.poll_git(ctx);
 
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.session.root = self.root.clone();
+            self.session.tabs = self.tabs.iter().filter_map(|t| t.path.clone()).collect();
+            self.session.active = self.active;
+            self.session.save();
+        }
+
+        self.ui_title_bar(ctx);
         self.ui_menu(ctx);
         self.ui_status(ctx);
         self.ui_terminal(ctx);
@@ -1640,29 +2035,36 @@ impl eframe::App for App {
         self.ui_central(ctx);
         self.ui_dialogs(ctx);
 
-        // редкий "пульс" для автосохранения и опроса git
         ctx.request_repaint_after(Duration::from_secs(1));
+
+        if self.restoring_cursors {
+            self.restoring_cursors = false;
+        }
     }
 }
 
 fn main() -> eframe::Result<()> {
     let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1280.0, 800.0])
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_icon(
+                eframe::icon_data::from_png_bytes(&std::fs::read("../images/icon.png").unwrap_or_default())
+                    .unwrap_or_default()
+            ),
+        persist_window: true,
         ..Default::default()
     };
     eframe::run_native(
         "RustCode",
         opts,
-        Box::new(|_cc| {
-            let mut app = App::new();
-            // rustcode <папка|файл>
+        Box::new(|cc| {
+            let mut app = App::new(cc);
             if let Some(arg) = std::env::args().nth(1) {
                 let p = PathBuf::from(arg);
-                if p.is_dir() {
-                    app.set_root(p);
-                } else if p.is_file() {
-                    app.open_file(p);
-                }
+                if p.is_dir() { app.set_root(p); }
+                else if p.is_file() { app.open_file(p); }
             }
             Ok(Box::new(app))
         }),

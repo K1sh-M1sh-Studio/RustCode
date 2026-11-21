@@ -100,8 +100,6 @@ impl Terminal {
                             let reply = {
                                 let mut p = parser.lock().unwrap();
                                 p.process(chunk);
-                                // Windows ConPTY и некоторые оболочки спрашивают позицию курсора (ESC[6n)
-                                // и зависают, если не получат ответ.
                                 if chunk.windows(4).any(|w| w == b"\x1b[6n") {
                                     let (r, c) = p.screen().cursor_position();
                                     Some(format!("\x1b[{};{}R", r + 1, c + 1))
@@ -143,7 +141,6 @@ impl Terminal {
         }
     }
 
-    /// Рисует терминал и обрабатывает ввод. Возвращает true, если терминал в фокусе.
     pub fn ui(&mut self, ui: &mut egui::Ui, font_size: f32) -> bool {
         let font = FontId::monospace(font_size);
         let (cw, ch) = ui.fonts(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
@@ -170,7 +167,6 @@ impl Terminal {
         let rows = ((rect.height() / ch).floor().max(2.0)) as u16;
         self.resize(rows, cols);
 
-        // Прокрутка колесом
         if resp.hovered() {
             let dy = ui.input(|i| i.smooth_scroll_delta.y);
             if dy.abs() > 0.5 {
@@ -181,7 +177,6 @@ impl Terminal {
             }
         }
 
-        // Ввод
         if focused {
             let events = ui.input(|i| i.events.clone());
             let app = self.parser.lock().unwrap().screen().application_cursor();
@@ -197,7 +192,7 @@ impl Terminal {
                         typed = true;
                     }
                     Event::Copy => {
-                        self.send(&[3]); // Ctrl+C -> SIGINT
+                        self.send(&[3]);
                         typed = true;
                     }
                     Event::Cut => {
@@ -218,7 +213,6 @@ impl Terminal {
             }
         }
 
-        // Отрисовка
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, TERM_BG);
         {
@@ -285,7 +279,7 @@ impl Terminal {
                 if focused {
                     painter.rect_filled(cur_rect, 0.0, Color32::from_white_alpha(140));
                 } else {
-                    painter.rect_stroke(cur_rect, 0.0, egui::Stroke::new(1.0, Color32::GRAY));
+                    painter.rect_stroke(cur_rect, 0.0, egui::Stroke::new(1.0_f32, Color32::GRAY));
                 }
             }
         }
@@ -294,7 +288,7 @@ impl Terminal {
             painter.text(
                 rect.right_bottom() - vec2(8.0, 8.0),
                 egui::Align2::RIGHT_BOTTOM,
-                "[процесс завершён — закройте вкладку или откройте новую]",
+                "[процесс завершён]",
                 FontId::proportional(12.0),
                 Color32::LIGHT_RED,
             );
@@ -333,12 +327,10 @@ fn key_bytes(key: Key, m: &Modifiers, app_cursor: bool) -> Option<Vec<u8>> {
         Key::PageUp => b"\x1b[5~".to_vec(),
         Key::PageDown => b"\x1b[6~".to_vec(),
         _ => {
-            // Ctrl+буква -> управляющий символ
             if m.ctrl && !m.alt {
                 let n = key.name();
                 if n.len() == 1 && n.as_bytes()[0].is_ascii_uppercase() {
                     let c = n.as_bytes()[0].to_ascii_lowercase();
-                    // C/X/V приходят отдельными событиями Copy/Cut/Paste (кроме macOS)
                     if matches!(c, b'c' | b'x' | b'v') && !cfg!(target_os = "macos") {
                         return None;
                     }

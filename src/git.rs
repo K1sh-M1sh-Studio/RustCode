@@ -7,7 +7,6 @@ use std::process::Command;
 pub struct GitFile {
     pub x: char,
     pub y: char,
-    /// путь относительно корня репозитория
     pub path: String,
 }
 
@@ -26,7 +25,6 @@ impl GitFile {
 #[derive(Clone, Default)]
 pub struct GitState {
     pub top: PathBuf,
-    /// путь открытой папки внутри репозитория ("" или "sub/")
     pub prefix: String,
     pub branch: String,
     pub upstream: String,
@@ -128,7 +126,7 @@ pub fn status(root: &Path) -> Status {
         let b = e.as_bytes();
         let (x, y) = (b[0] as char, b[1] as char);
         if x == 'R' || x == 'C' || y == 'R' || y == 'C' {
-            it.next(); // исходное имя при переименовании
+            it.next();
         }
         st.files.push(GitFile { x, y, path: e[3..].to_string() });
     }

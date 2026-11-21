@@ -1,1 +1,1 @@
-E:\RustCode\target\release\rustcode.exe: E:\RustCode\src\git.rs E:\RustCode\src\highlight.rs E:\RustCode\src\main.rs E:\RustCode\src\settings.rs E:\RustCode\src\terminal.rs
+E:\RustCode\target\release\rustcode.exe: E:\RustCode\images\file.png E:\RustCode\images\folder.png E:\RustCode\images\icon.png E:\RustCode\src\git.rs E:\RustCode\src\highlight.rs E:\RustCode\src\main.rs E:\RustCode\src\settings.rs E:\RustCode\src\terminal.rs

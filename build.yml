@@ -1,0 +1,44 @@
+name: Build RustCode For Windows And Linux
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: RustCode_Linux
+            bin_path: target/release/RustCode_Linux
+          - os: windows-latest
+            artifact_name: RustCode_Windows.exe
+            bin_path: target/release/RustCode_Windows.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Получить код
+        uses: actions/checkout@v6
+
+      - name: Установить Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Кэшировать зависимости Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Собрать релизную версию
+        run: cargo build --release --locked
+
+      - name: Сохранить собранный бинарник
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.bin_path }}

@@ -1,16 +1,17 @@
 [package]
 name = "rustcode"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 
 [dependencies]
+open = "5"
 eframe = "0.29"
-# Подсветка: чистый Rust (fancy-regex), без C-зависимостей
+egui_extras = { version = "0.29", features = ["image"] }
+image = { version = "0.25", features = ["png"] }
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Настоящий терминал: PTY + эмулятор VT100
 portable-pty = "0.8"
 vt100 = "0.18"
 

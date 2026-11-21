@@ -4,5 +4,7 @@
   "word_wrap": true,
   "trim_trailing_whitespace": true,
   "terminal_shell": null,
-  "explorer_exclude": null
+  "explorer_exclude": null,
+  "run_command": null,
+  "build_command": "start build.bat"
 }

@@ -3,3 +3,7 @@
 .rustcode
 Cargo.lock
 target/
+*.exe
+*.zip
+*.7z
+*.rar

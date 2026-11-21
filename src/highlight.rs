@@ -1,7 +1,4 @@
-//! Инкрементальная подсветка: перераспознаются только изменённые строки.
-//! Для каждой строки хранится хэш, результат и состояние парсера ПОСЛЕ неё.
-//! При правке переиспользуем неизменённое начало и, когда состояние
-//! "сошлось" (как до правки), — неизменённый хвост.
+//! Инкрементальная подсветка.
 
 use eframe::egui::{text::LayoutJob, Color32, FontId, TextFormat};
 use std::collections::hash_map::DefaultHasher;
@@ -37,7 +34,6 @@ fn highlight_line(
     line: &str,
     fallback: Color32,
 ) -> Vec<(usize, Color32)> {
-    // Очень длинные строки (минифицированный код) не подсвечиваем.
     if line.len() > 3000 {
         return vec![(line.len(), fallback)];
     }
@@ -88,7 +84,6 @@ impl HlCache {
         let src: Vec<&str> = LinesWithEndings::from(text).collect();
         let hashes: Vec<u64> = src.iter().map(|l| hash_str(l)).collect();
 
-        // 1) общий неизменённый префикс
         let mut i = 0;
         while i < src.len() && i < self.lines.len() && self.lines[i].hash == hashes[i] {
             i += 1;
@@ -103,7 +98,6 @@ impl HlCache {
             ),
         };
 
-        // 2) пересчёт изменённой части, с переиспользованием хвоста
         let mut j = i;
         while j < src.len() {
             let spans = highlight_line(ss, &hl, &mut ps, &mut hs, src[j], fallback);
@@ -130,7 +124,6 @@ impl HlCache {
             }
         }
 
-        // 3) сборка LayoutJob
         let mut job = LayoutJob::default();
         for (l, line) in self.lines.iter().zip(src.iter()) {
             let mut off = 0;

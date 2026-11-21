@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub fn config_dir() -> PathBuf {
@@ -26,6 +27,10 @@ fn trust_path() -> PathBuf {
     config_dir().join("trusted_folders.json")
 }
 
+pub fn session_path() -> PathBuf {
+    config_dir().join("session.json")
+}
+
 pub fn load_json<T: for<'a> Deserialize<'a> + Default>(p: &Path) -> T {
     std::fs::read_to_string(p)
         .ok()
@@ -42,7 +47,6 @@ pub fn save_json<T: Serialize>(p: &Path, v: &T) {
     }
 }
 
-/// Настройки редактора (пользовательские).
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Settings {
@@ -55,9 +59,7 @@ pub struct Settings {
     pub auto_save: bool,
     pub trim_trailing_whitespace: bool,
     pub terminal_font_size: f32,
-    /// Пусто = shell по умолчанию ($SHELL / powershell)
     pub terminal_shell: String,
-    /// Имена или маски вида "*.o", скрываемые в проводнике
     pub explorer_exclude: Vec<String>,
     pub git_poll_secs: u64,
 }
@@ -81,8 +83,6 @@ impl Default for Settings {
     }
 }
 
-/// Переопределения на уровне проекта: <папка>/.rustcode/settings.json
-/// Применяются ТОЛЬКО в доверенной папке.
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ProjectSettings {
@@ -92,29 +92,19 @@ pub struct ProjectSettings {
     pub trim_trailing_whitespace: Option<bool>,
     pub terminal_shell: Option<String>,
     pub explorer_exclude: Option<Vec<String>>,
+    pub run_command: Option<String>,
+    pub build_command: Option<String>,
 }
 
 impl Settings {
     pub fn merged(&self, p: &ProjectSettings) -> Settings {
         let mut s = self.clone();
-        if let Some(v) = p.tab_size {
-            s.tab_size = v;
-        }
-        if let Some(v) = p.insert_spaces {
-            s.insert_spaces = v;
-        }
-        if let Some(v) = p.word_wrap {
-            s.word_wrap = v;
-        }
-        if let Some(v) = p.trim_trailing_whitespace {
-            s.trim_trailing_whitespace = v;
-        }
-        if let Some(v) = &p.terminal_shell {
-            s.terminal_shell = v.clone();
-        }
-        if let Some(v) = &p.explorer_exclude {
-            s.explorer_exclude = v.clone();
-        }
+        if let Some(v) = p.tab_size { s.tab_size = v; }
+        if let Some(v) = p.insert_spaces { s.insert_spaces = v; }
+        if let Some(v) = p.word_wrap { s.word_wrap = v; }
+        if let Some(v) = p.trim_trailing_whitespace { s.trim_trailing_whitespace = v; }
+        if let Some(v) = &p.terminal_shell { s.terminal_shell = v.clone(); }
+        if let Some(v) = &p.explorer_exclude { s.explorer_exclude = v.clone(); }
         s
     }
 }
@@ -123,7 +113,6 @@ fn canon(p: &Path) -> PathBuf {
     p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
 }
 
-/// Список доверенных папок (Workspace Trust).
 #[derive(Default, Serialize, Deserialize)]
 pub struct TrustStore {
     pub trusted: Vec<PathBuf>,
@@ -134,7 +123,6 @@ impl TrustStore {
         load_json(&trust_path())
     }
 
-    /// Папка доверена, если она сама или любой её родитель в списке.
     pub fn is_trusted(&self, p: &Path) -> bool {
         let c = canon(p);
         self.trusted.iter().any(|t| c.starts_with(t))
@@ -146,5 +134,28 @@ impl TrustStore {
             self.trusted.push(c);
         }
         save_json(&trust_path(), self);
+    }
+
+    pub fn remove(&mut self, p: &Path) {
+        let c = canon(p);
+        self.trusted.retain(|t| *t != c);
+        save_json(&trust_path(), self);
+    }
+}
+
+#[derive(Default, Serialize, Deserialize)]
+pub struct SessionData {
+    pub root: Option<PathBuf>,
+    pub tabs: Vec<PathBuf>,
+    pub active: usize,
+    pub cursors: HashMap<String, usize>,
+}
+
+impl SessionData {
+    pub fn load() -> Self {
+        load_json(&session_path())
+    }
+    pub fn save(&self) {
+        save_json(&session_path(), self);
     }
 }
