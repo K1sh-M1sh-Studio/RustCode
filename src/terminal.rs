@@ -1,6 +1,3 @@
-//! Настоящий терминал: псевдотерминал (portable-pty) + эмулятор VT100 (vt100),
-//! отрисовка сетки ячеек с цветами прямо в egui.
-
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{self, pos2, vec2, Color32, Event, EventFilter, FontId, Key, Modifiers, Rect, Sense};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};

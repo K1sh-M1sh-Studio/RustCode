@@ -623,11 +623,11 @@ impl App {
                         Ok(s) => {
                             if label == "commit" { self.commit_msg.clear(); }
                             self.git_msg = format!("✔ {label}\n{}", s.trim());
-                            self.status = format!("git: {label} — готово");
+                            self.status = format!("git: {label} - готово");
                         }
                         Err(e) => {
                             self.git_msg = format!("✖ {label}\n{}", e.trim());
-                            self.status = format!("git: {label} — ошибка");
+                            self.status = format!("git: {label} - ошибка");
                         }
                     }
                 }
@@ -1092,7 +1092,7 @@ impl App {
                     }
                 }
                 if let Some(git::Status::Repo(s)) = &self.git {
-                    let t = format!("git: {} ↓{} ↑{}", s.branch, s.behind, s.ahead);
+                    let t = format!("git: {} {} {}", s.branch, s.behind, s.ahead);
                     if ui.button(t).clicked() { self.show_side = true; self.side = Side::Git; }
                 }
                 ui.label(&self.status);
@@ -1100,8 +1100,8 @@ impl App {
                 if self.show_output {
                     let errors = self.output_log.lines().filter(|l| l.contains("error")).count();
                     let warnings = self.output_log.lines().filter(|l| l.contains("warning")).count();
-                    if errors > 0 { ui.colored_label(Color32::LIGHT_RED, format!("🔴 {} err", errors)); }
-                    if warnings > 0 { ui.colored_label(Color32::YELLOW, format!("🟡 {} warn", warnings)); }
+                    if errors > 0 { ui.colored_label(Color32::LIGHT_RED, format!(" {} err", errors)); }
+                    if warnings > 0 { ui.colored_label(Color32::YELLOW, format!(" {} warn", warnings)); }
                 }
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1190,7 +1190,7 @@ impl App {
                 _ => 0,
             };
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.side, Side::Explorer, "📂 Файлы");
+                ui.selectable_value(&mut self.side, Side::Explorer, "Файлы");
                 let t = if n > 0 { format!("Git ({n})") } else { "Git".to_string() };
                 ui.selectable_value(&mut self.side, Side::Git, t);
             });
@@ -1215,7 +1215,7 @@ impl App {
             egui::ScrollArea::horizontal().id_salt("tabs_scroll").show(ui, |ui| {
                 ui.horizontal(|ui| {
                     for (i, t) in self.tabs.iter().enumerate() {
-                        let label = if t.dirty { format!("{} ●", t.title) } else { t.title.clone() };
+                        let label = if t.dirty { format!("{} !", t.title) } else { t.title.clone() };
                         if ui.selectable_label(i == self.active, label).clicked() { activate = Some(i); }
                         if ui.small_button("×").clicked() { close = Some(i); }
                         ui.add_space(4.0);
@@ -1684,8 +1684,8 @@ impl App {
         }
 
         if self.show_plugins {
-            egui::Window::new("Магазин плагинов").open(&mut self.show_plugins).show(ctx, |_ui| {
-                let _langs = vec!["Будет не много позже"];
+            egui::Window::new("Магазин плагинов").open(&mut self.show_plugins).show(ctx, |ui| {
+                ui.label(RichText::new("Появиться позже...").strong());
             });
         }
 
