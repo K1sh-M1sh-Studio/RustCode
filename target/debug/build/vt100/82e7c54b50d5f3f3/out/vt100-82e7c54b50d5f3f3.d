@@ -1,0 +1,12 @@
+E:\RustCode\target\debug\build\vt100/82e7c54b50d5f3f3\out\vt100-82e7c54b50d5f3f3.d: C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\lib.rs C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\attrs.rs C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\cell.rs C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\grid.rs C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\parser.rs C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\row.rs C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\screen.rs C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\term.rs
+
+E:\RustCode\target\debug\build\vt100/82e7c54b50d5f3f3\out\libvt100-82e7c54b50d5f3f3.rmeta: C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\lib.rs C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\attrs.rs C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\cell.rs C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\grid.rs C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\parser.rs C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\row.rs C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\screen.rs C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\term.rs
+
+C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\lib.rs:
+C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\attrs.rs:
+C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\cell.rs:
+C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\grid.rs:
+C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\parser.rs:
+C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\row.rs:
+C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\screen.rs:
+C:\Users\teymu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\vt100-0.15.2\src\term.rs:
