@@ -35,7 +35,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Собрать релизную версию
-        run: cargo build --release --locked
+        run: cargo build --release
 
       - name: Сохранить собранный бинарник
         uses: actions/upload-artifact@v4
