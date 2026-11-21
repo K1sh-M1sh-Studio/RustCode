@@ -227,6 +227,7 @@ struct App {
 
     show_about: bool,
     show_github: bool,
+    show_issues: bool,
     show_plugins: bool,
     show_output: bool,
     output_log: String,
@@ -309,6 +310,7 @@ impl App {
 
             show_about: false,
             show_github: false,
+            show_issues: false,
             show_plugins: false,
             show_output: false,
             output_log: String::new(),
@@ -403,7 +405,7 @@ impl App {
         }
         if let Ok(md) = std::fs::metadata(&path) {
             if md.len() > 20 * 1024 * 1024 {
-                self.status = "Файл больше 20 МБ!".into();
+                self.status = "Файл больше 20 МБ".into();
                 return;
             }
         }
@@ -593,7 +595,7 @@ impl App {
                     self.output_log.push_str("\n--- STDERR ---\n");
                     self.output_log.push_str(&stderr);
                 }
-                self.status = if out.status.success() { "Успешно выполнено".into() } else { "Ошибка выполнения".into() };
+                self.status = if out.status.success() { "Выполнено успешно".into() } else { "Ошибка выполнения".into() };
             }
             Err(e) => {
                 self.output_log.push_str(&format!("Ошибка запуска: {}\n", e));
@@ -1011,9 +1013,9 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.add(egui::Image::new(egui::include_image!("../images/icon.png")).max_size(vec2(16.0, 16.0)));
 
-                    let project_name = self.root.as_ref().map(|p| name_of(p)).unwrap_or_else(|| "Без проекта".into());
+                    let project_name = self.root.as_ref().map(|p| name_of(p)).unwrap_or_else(|| "Безимянный".into());
                     let title = if !self.trusted && self.root.is_some() {
-                        format!("RustCode || {} || 🔒 Ограниченный режим", project_name)
+                        format!("RustCode || {} || Ограниченный режим", project_name)
                     } else if self.root.is_some() {
                         format!("RustCode || {}", project_name)
                     } else {
@@ -1077,7 +1079,8 @@ impl App {
                 });
                 ui.menu_button("Справка", |ui| {
                     if ui.button("О программе (F1)").clicked() { self.show_about = true; ui.close_menu(); }
-                    if ui.button("GitHub").clicked() { self.show_github = true; ui.close_menu(); }
+                    if ui.button("GitHub (F8)").clicked() { self.show_github = true; ui.close_menu(); }
+                    if ui.button("Сообщить о баге").clicked() { self.show_issues = true; ui.close_menu(); }
                 });
             });
         });
@@ -1087,7 +1090,7 @@ impl App {
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if !self.trusted && self.root.is_some() {
-                    if ui.button(RichText::new("🛡 Ограниченный режим").color(Color32::from_rgb(230, 160, 60))).clicked() {
+                    if ui.button(RichText::new("Ограниченный режим").color(Color32::from_rgb(230, 160, 60))).clicked() {
                         self.trust_prompt = true;
                     }
                 }
@@ -1678,8 +1681,16 @@ impl App {
             self.show_github = false;
 
             let url = "https://github.com/K1sh-M1sh-Studio/RustCode";
-            if let Err(e) = open::that(url) {
+            if let Err(_e) = open::that(url) {
                 eprintln!("Не удалось открыть сайт GitHub");
+            }
+        }
+
+        if self.show_issues {
+            self.show_issues = false;
+            let url = "https://github.com/K1sh-M1sh-Studio/RustCode/issues";
+            if let Err(_e) = open::that(url) {
+                eprintln!("Не удалось загрузить страницу!");
             }
         }
 

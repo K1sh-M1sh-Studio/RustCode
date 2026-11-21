@@ -1,5 +1,3 @@
-//! Git через консольный `git` (без libgit2 — не нужна C-сборка).
-
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
