@@ -1,3 +1,6 @@
+/* K1sh-M1sh Members - License MIT */
+/* © 2026, K1sh-M1sh Members */
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

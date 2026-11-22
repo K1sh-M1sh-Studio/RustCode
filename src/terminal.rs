@@ -1,3 +1,6 @@
+/* K1sh-M1sh Members - License MIT */
+/* © 2026, K1sh-M1sh Members */
+
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{self, pos2, vec2, Color32, Event, EventFilter, FontId, Key, Modifiers, Rect, Sense};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};

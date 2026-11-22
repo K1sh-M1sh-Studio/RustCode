@@ -1,6 +1,10 @@
+/* K1sh-M1sh Members - License MIT */
+/* © 2026, K1sh-M1sh Members */
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use crate::i18n::Language;
 
 pub fn config_dir() -> PathBuf {
     let base = if cfg!(windows) {
@@ -55,6 +59,7 @@ pub struct Settings {
     pub insert_spaces: bool,
     pub word_wrap: bool,
     pub line_numbers: bool,
+    pub indent_guides: bool, // <-- НОВОЕ
     pub theme: String,
     pub auto_save: bool,
     pub trim_trailing_whitespace: bool,
@@ -62,6 +67,8 @@ pub struct Settings {
     pub terminal_shell: String,
     pub explorer_exclude: Vec<String>,
     pub git_poll_secs: u64,
+    #[serde(default)]
+    pub language: Language,
 }
 
 impl Default for Settings {
@@ -72,6 +79,7 @@ impl Default for Settings {
             insert_spaces: true,
             word_wrap: false,
             line_numbers: true,
+            indent_guides: true, // <-- Включено по умолчанию
             theme: "base16-ocean.dark".into(),
             auto_save: false,
             trim_trailing_whitespace: false,
@@ -79,6 +87,7 @@ impl Default for Settings {
             terminal_shell: String::new(),
             explorer_exclude: vec![".git".into(), "target".into(), "node_modules".into(), ".DS_Store".into()],
             git_poll_secs: 3,
+            language: Language::default(),
         }
     }
 }
