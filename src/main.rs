@@ -131,6 +131,7 @@ struct Tab {
     hl: highlight::HlCache,
     gkey: u64,
     galley: Option<Arc<egui::Galley>>,
+    pending_cursor: Option<usize>,
 }
 
 impl Tab {
@@ -147,6 +148,7 @@ impl Tab {
             hl: Default::default(),
             gkey: 0,
             galley: None,
+            pending_cursor: None,
         }
     }
 }
@@ -155,6 +157,7 @@ enum Msg {
     Status(git::Status),
     GitDone { label: String, result: Result<String, String> },
     OpenText { title: String, text: String, ext: String },
+    AutosaveDone { uid: u64, result: Result<(), String> },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -259,6 +262,8 @@ struct App {
 
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
+
+    md_cache: egui_commonmark::CommonMarkCache,
 }
 
 impl App {
@@ -344,6 +349,7 @@ impl App {
             restoring_cursors: true,
             tx,
             rx,
+            md_cache: egui_commonmark::CommonMarkCache::default(),
         };
 
         if let Some(root) = app.session.root.clone() {
@@ -426,7 +432,15 @@ impl App {
                 self.next_uid += 1;
                 self.status = format!("{} {}", &self.loc.open_file, path.display());
                 let readonly = !self.trusted;
-                self.tabs.push(Tab::new(uid, Some(path.clone()), name_of(&path), text, ext_of(&path), readonly));
+
+                let mut tab = Tab::new(uid, Some(path.clone()), name_of(&path), text, ext_of(&path), readonly);
+
+                // Запоминаем, куда нужно поставить курсор при отрисовке
+                if let Some(&char_idx) = self.session.cursors.get(&path.to_string_lossy().to_string()) {
+                    tab.pending_cursor = Some(char_idx);
+                }
+
+                self.tabs.push(tab);
                 self.active = self.tabs.len() - 1;
                 self.update_suggestions();
             }
@@ -446,6 +460,15 @@ impl App {
         self.next_uid += 1;
         self.tabs.push(Tab::new(uid, None, title, text, ext, true));
         self.active = self.tabs.len() - 1;
+    }
+
+    fn save_all_tabs(&mut self) {
+        for i in 0..self.tabs.len() {
+            if self.tabs[i].dirty && !self.tabs[i].readonly {
+                self.save_tab(i);
+            }
+        }
+        self.status = self.loc.save_all.clone(); // Или любой другой статус
     }
 
     fn save_tab(&mut self, idx: usize) {
@@ -503,10 +526,28 @@ impl App {
 
     fn autosave(&mut self) {
         if !self.eff.auto_save || !self.trusted { return; }
+
         let idxs: Vec<usize> = self.tabs.iter().enumerate()
             .filter(|(_, t)| t.dirty && !t.readonly && t.path.is_some() && t.last_edit.elapsed() > Duration::from_millis(1200))
             .map(|(i, _)| i).collect();
-        for i in idxs { self.save_tab(i); }
+
+        for i in idxs {
+            let tab = &mut self.tabs[i];
+            let Some(path) = &tab.path else { continue };
+            let path = path.clone();
+            let text = tab.text.clone();
+            let uid = tab.uid;
+            let tx = self.tx.clone();
+
+            // Снимаем флаг dirty сразу, чтобы не запускать поток каждую секунду.
+            // Если произойдет ошибка, мы вернем его обратно в pump.
+            tab.dirty = false;
+
+            thread::spawn(move || {
+                let res = std::fs::write(&path, text).map_err(|e| e.to_string());
+                let _ = tx.send(Msg::AutosaveDone { uid, result: res });
+            });
+        }
     }
 
     fn create_entry(&mut self, dir: PathBuf, is_dir: bool, name: &str) {
@@ -642,6 +683,17 @@ impl App {
                             self.git_msg = format!("✖ {label}\n{}", e.trim());
                             self.status = format!("{}", &self.loc.git_error);
                         }
+                    }
+                }
+                Msg::AutosaveDone { uid, result } => {
+                    if let Err(e) = result {
+                        // Если не удалось сохранить — возвращаем пометку "грязный", чтобы попробовать снова
+                        if let Some(tab) = self.tabs.iter_mut().find(|t| t.uid == uid) {
+                            tab.dirty = true;
+                        }
+                        self.status = format!("{} {e}", &self.loc.error_autosave);
+                    } else {
+                        self.status = format!("{}", &self.loc.save);
                     }
                 }
                 Msg::OpenText { title, text, ext } => self.open_virtual(title, text, ext),
@@ -969,6 +1021,9 @@ impl App {
             let build_cmd = self.project.build_command.clone().unwrap_or_default();
             self.run_command(&build_cmd, true);
         }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S)) {
+            self.save_all_tabs();
+        }
 
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::F)) {
             self.show_find = true;
@@ -1058,7 +1113,7 @@ impl App {
                         self.active = self.tabs.len() - 1;
                         ui.close_menu();
                     }
-                    if ui.button(&self.loc.open_file).clicked() {
+                    if ui.button(&self.loc.open_file_button_an_file).clicked() {
                         if let Some(p) = rfd::FileDialog::new().pick_file() { self.open_file(p); }
                         ui.close_menu();
                     }
@@ -1066,7 +1121,8 @@ impl App {
                         if let Some(p) = rfd::FileDialog::new().pick_folder() { self.set_root(p); }
                         ui.close_menu();
                     }
-                    if ui.button(&self.loc.save).clicked() { self.save_tab(self.active); ui.close_menu(); }
+                    if ui.button(&self.loc.save_button_an_file).clicked() { self.save_tab(self.active); ui.close_menu(); }
+                    if ui.button(&self.loc.save_all).clicked() { self.save_all_tabs(); ui.close_menu(); }
                     ui.separator();
                     if ui.button(&self.loc.btn_settings).clicked() { self.show_settings = true; ui.close_menu(); }
                     if ui.button(&self.loc.btn_store).clicked() { self.show_plugins = true; ui.close_menu(); }
@@ -1298,28 +1354,24 @@ impl App {
 
         let font = FontId::monospace(eff.font_size);
         let (cw, rh) = ui.fonts(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
-        let Tab { uid, text, dirty, readonly, last_edit, hl, gkey, galley, ext, path, .. } = tab;
+
+        let Tab { uid, text, dirty, readonly, last_edit, hl, gkey, galley, ext, path, pending_cursor, .. } = tab;
         let id = egui::Id::new(("editor", *uid));
         let ctx = ui.ctx().clone();
 
-        // Восстанавливаем позицию курсора, если это первый кадр после запуска
-        if self.restoring_cursors {
-            if let Some(p) = path {
-                let p_str = p.to_string_lossy().to_string();
-                if let Some(&char_idx) = self.session.cursors.get(&p_str) {
-                    if let Some(mut st) = egui::TextEdit::load_state(&ctx, id) {
-                        st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(char_idx))));
-                        st.store(&ctx, id);
-                    } else {
-                        let mut st = egui::TextEdit::load_state(&ctx, id).unwrap_or_default();
-                        st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(char_idx))));
-                        st.store(&ctx, id);
-                    }
-                }
+        // Восстанавливаем курсор
+        if let Some(pos) = pending_cursor.take() {
+            if let Some(mut st) = egui::TextEdit::load_state(&ctx, id) {
+                st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(pos))));
+                st.store(&ctx, id);
+            } else {
+                let mut st = egui::TextEdit::load_state(&ctx, id).unwrap_or_default();
+                st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(pos))));
+                st.store(&ctx, id);
             }
         }
 
-        // Сохраняем позицию курсора в сессию
+        // Сохраняем позицию курсора
         if let Some((a, _)) = cursor_range(&ctx, id) {
             if let Some(p) = path {
                 self.session.cursors.insert(p.to_string_lossy().to_string(), a);
@@ -1400,7 +1452,6 @@ impl App {
                     let indent_str = if eff.insert_spaces { " ".repeat(eff.tab_size.max(1)) } else { "\t".to_string() };
                     let indent_chars = indent_str.chars().count();
 
-                    // Находим начало первой выделенной строки
                     let ba = byte_idx(text, a);
                     let line_start_byte = text[..ba].rfind('\n').map(|i| i + 1).unwrap_or(0);
                     let bb = byte_idx(text, b);
@@ -1416,7 +1467,6 @@ impl App {
                             if idx == 0 { removed_first = indent_chars; }
                             total_removed += indent_chars;
                         } else if line.starts_with('\t') || line.starts_with(' ') {
-                            // Если отступ меньше стандартного, убираем доступные пробелы/таб
                             let space_count = line.chars().take(indent_chars).take_while(|c| *c == ' ' || *c == '\t').count();
                             let skip_bytes = byte_idx(line, space_count);
                             new_block.push_str(&line[skip_bytes..]);
@@ -1450,7 +1500,6 @@ impl App {
                     let indent_chars = indent_str.chars().count();
 
                     if a != b {
-                        // Если есть выделение — сдвигаем все затронутые строки вправо
                         let ba = byte_idx(text, a);
                         let line_start_byte = text[..ba].rfind('\n').map(|i| i + 1).unwrap_or(0);
                         let bb = byte_idx(text, b);
@@ -1467,7 +1516,6 @@ impl App {
 
                         text.replace_range(line_start_byte..bb, &new_block);
 
-                        // Восстанавливаем выделение с учетом добавленных отступов
                         if let Some(mut st) = egui::TextEdit::load_state(&ctx, id) {
                             let new_a = a + indent_chars;
                             let new_b = b + indent_chars * lines_count;
@@ -1480,7 +1528,6 @@ impl App {
                         *dirty = true;
                         *last_edit = Instant::now();
                     } else if eff.insert_spaces {
-                        // Если ничего не выделено — просто вставляем пробелы
                         replace_range(&ctx, id, text, a, b, &indent_str);
                         *dirty = true;
                         *last_edit = Instant::now();
@@ -1501,7 +1548,6 @@ impl App {
                 }
             }
         }
-
 
         let mut layouter = |ui: &egui::Ui, t: &str, wrap: f32| -> Arc<egui::Galley> {
             let wrap = if eff.word_wrap { wrap } else { f32::INFINITY };
@@ -1536,92 +1582,180 @@ impl App {
         let rows = ((view_h / rh).ceil() as usize).max(4);
         let mut changed = false;
         let ro_flag = *readonly;
-        let mut ro: &str = text.as_str();
-        let buf: &mut dyn egui::TextBuffer = if ro_flag { &mut ro } else { text };
 
-        let sa = if eff.word_wrap { egui::ScrollArea::vertical() } else { egui::ScrollArea::both() };
-        let out = sa.auto_shrink([false, false]).show(ui, |ui| {
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                let gutter = if eff.line_numbers { Some(ui.allocate_exact_size(vec2(gw, 1.0), Sense::hover()).0) } else { None };
-                let width = if eff.word_wrap { ui.available_width() } else { f32::INFINITY };
-                let out = egui::TextEdit::multiline(buf)
-                    .id(id)
-                    .frame(false)
-                    .lock_focus(true)
-                    .desired_width(width)
-                    .desired_rows(rows)
-                    .layouter(&mut layouter)
-                    .show(ui);
-                if out.response.changed() { changed = true; }
+        if *ext == "md" {
+            // --- РЕЖИМ MARKDOWN (РАЗДЕЛЕННЫЙ ЭКРАН) ---
+            ui.columns(2, |cols| {
+                // ЛЕВАЯ КОЛОНКА: Редактор
+                {
+                    let mut ro: &str = text.as_str();
+                    let buf: &mut dyn egui::TextBuffer = if ro_flag { &mut ro } else { text };
 
-                if eff.indent_guides {
-                    let painter = ui.painter();
-                    let clip = ui.clip_rect();
-                    let guide_color = fg.gamma_multiply(0.15);
-                    let stroke = egui::Stroke::new(1.0_f32, guide_color);
+                    let sa = if eff.word_wrap { egui::ScrollArea::vertical() } else { egui::ScrollArea::both() };
+                    sa.id_salt("md_editor_scroll")
+                      .auto_shrink([false, false]).show(&mut cols[0], |ui| {
+                        ui.horizontal_top(|ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            let gutter = if eff.line_numbers { Some(ui.allocate_exact_size(vec2(gw, 1.0), Sense::hover()).0) } else { None };
+                            let width = if eff.word_wrap { ui.available_width() } else { f32::INFINITY };
+                            let out = egui::TextEdit::multiline(buf)
+                                .id(id)
+                                .frame(false)
+                                .lock_focus(true)
+                                .desired_width(width)
+                                .desired_rows(rows)
+                                .layouter(&mut layouter)
+                                .show(ui);
+                            if out.response.changed() { changed = true; }
 
-                    for row in &out.galley.rows {
-                        let y_min = out.galley_pos.y + row.rect.min.y;
-                        let y_max = out.galley_pos.y + row.rect.max.y;
+                            // Полосы отступов
+                            if eff.indent_guides {
+                                let painter = ui.painter();
+                                let clip = ui.clip_rect();
+                                let guide_color = fg.gamma_multiply(0.15);
+                                let stroke = egui::Stroke::new(1.0_f32, guide_color);
+                                for row in &out.galley.rows {
+                                    let y_min = out.galley_pos.y + row.rect.min.y;
+                                    let y_max = out.galley_pos.y + row.rect.max.y;
+                                    if y_max < clip.min.y || y_min > clip.max.y { continue; }
 
-                        if y_max < clip.min.y || y_min > clip.max.y {
-                            continue;
-                        }
+                                    let mut has_text = false;
+                                    for glyph in &row.glyphs {
+                                        if glyph.chr != ' ' && glyph.chr != '\t' { has_text = true; break; }
+                                    }
+                                    if !has_text { continue; }
 
-                        let mut spaces = 0;
-                        for glyph in &row.glyphs {
-                            if glyph.chr == ' ' {
-                                spaces += 1;
-                                if spaces % eff.tab_size.max(1) == 0 {
-                                    // Правая граница последнего пробела в отступе
-                                    let x = out.galley_pos.x + glyph.pos.x + glyph.size().x;
-                                    painter.vline(x, y_min..=y_max, stroke);
+                                    let mut leading_spaces = 0;
+                                    for glyph in &row.glyphs {
+                                        if glyph.chr == ' ' { leading_spaces += 1; }
+                                        else if glyph.chr == '\t' { leading_spaces += eff.tab_size; }
+                                        else { break; }
+                                    }
+                                    let levels = leading_spaces / eff.tab_size.max(1);
+                                    for l in 1..=levels {
+                                        let x = out.galley_pos.x + (l * eff.tab_size) as f32 * cw;
+                                        painter.vline(x, y_min..=y_max, stroke);
+                                    }
                                 }
-                            } else if glyph.chr == '\t' {
-                                let next_stop = ((spaces / eff.tab_size.max(1)) + 1) * eff.tab_size.max(1);
-                                spaces = next_stop;
-                                // Правая граница символа табуляции
-                                let x = out.galley_pos.x + glyph.pos.x + glyph.size().x;
+                            }
+
+                            // Номера строк
+                            if let Some(gr) = gutter {
+                                let painter = ui.painter();
+                                let clip = ui.clip_rect();
+                                let col = fg.gamma_multiply(0.45);
+                                let mut n = 1usize;
+                                let mut newline = true;
+                                for row in &out.galley.rows {
+                                    let y = out.galley_pos.y + row.rect.min.y;
+                                    if newline {
+                                        if y + rh >= clip.min.y && y <= clip.max.y {
+                                            painter.text(pos2(gr.max.x - 6.0, y), Align2::RIGHT_TOP, n.to_string(), font.clone(), col);
+                                        }
+                                        n += 1;
+                                    }
+                                    newline = row.ends_with_newline;
+                                    if y > clip.max.y { break; }
+                                }
+                            }
+                        });
+                    });
+                }
+
+                // ПРАВАЯ КОЛОНКА: Превью
+                egui::ScrollArea::vertical()
+                    .id_salt("md_preview_scroll")
+                    .show(&mut cols[1], |ui| {
+                        let text_view = text.as_str();
+                        egui_commonmark::CommonMarkViewer::new()
+                            .show(ui, &mut self.md_cache, text_view);
+                    });
+            });
+        } else {
+            // --- ОБЫЧНЫЙ РЕЖИМ ---
+            let mut ro: &str = text.as_str();
+            let buf: &mut dyn egui::TextBuffer = if ro_flag { &mut ro } else { text };
+
+            let sa = if eff.word_wrap { egui::ScrollArea::vertical() } else { egui::ScrollArea::both() };
+            sa.id_salt("normal_editor_scroll")
+              .auto_shrink([false, false]).show(ui, |ui| {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    let gutter = if eff.line_numbers { Some(ui.allocate_exact_size(vec2(gw, 1.0), Sense::hover()).0) } else { None };
+                    let width = if eff.word_wrap { ui.available_width() } else { f32::INFINITY };
+                    let out = egui::TextEdit::multiline(buf)
+                        .id(id)
+                        .frame(false)
+                        .lock_focus(true)
+                        .desired_width(width)
+                        .desired_rows(rows)
+                        .layouter(&mut layouter)
+                        .show(ui);
+                    if out.response.changed() { changed = true; }
+
+                    // Полосы отступов
+                    if eff.indent_guides {
+                        let painter = ui.painter();
+                        let clip = ui.clip_rect();
+                        let guide_color = fg.gamma_multiply(0.15);
+                        let stroke = egui::Stroke::new(1.0_f32, guide_color);
+                        for row in &out.galley.rows {
+                            let y_min = out.galley_pos.y + row.rect.min.y;
+                            let y_max = out.galley_pos.y + row.rect.max.y;
+                            if y_max < clip.min.y || y_min > clip.max.y { continue; }
+
+                            let mut has_text = false;
+                            for glyph in &row.glyphs {
+                                if glyph.chr != ' ' && glyph.chr != '\t' { has_text = true; break; }
+                            }
+                            if !has_text { continue; }
+
+                            let mut leading_spaces = 0;
+                            for glyph in &row.glyphs {
+                                if glyph.chr == ' ' { leading_spaces += 1; }
+                                else if glyph.chr == '\t' { leading_spaces += eff.tab_size; }
+                                else { break; }
+                            }
+                            let levels = leading_spaces / eff.tab_size.max(1);
+                            for l in 1..=levels {
+                                let x = out.galley_pos.x + (l * eff.tab_size) as f32 * cw;
                                 painter.vline(x, y_min..=y_max, stroke);
-                            } else {
-                                break;
                             }
                         }
                     }
-                }
 
-                // --- ПРОКРУТКА ВНУТРИ ScrollArea ---
-                if let Some(target_char) = self.scroll_to_char.take() {
-                    let cur = out.galley.from_ccursor(CCursor::new(target_char));
-                    let cursor_rect = out.galley.pos_from_cursor(&cur);
-                    let target_rect = cursor_rect
-                        .translate(out.galley_pos.to_vec2())
-                        .expand2(vec2(20.0, 80.0));
-                    ui.scroll_to_rect(target_rect, Some(Align::Center));
-                }
-
-                if let Some(gr) = gutter {
-                    let painter = ui.painter();
-                    let clip = ui.clip_rect();
-                    let col = fg.gamma_multiply(0.45);
-                    let mut n = 1usize;
-                    let mut newline = true;
-                    for row in &out.galley.rows {
-                        let y = out.galley_pos.y + row.rect.min.y;
-                        if newline {
-                            if y + rh >= clip.min.y && y <= clip.max.y {
-                                painter.text(pos2(gr.max.x - 6.0, y), Align2::RIGHT_TOP, n.to_string(), font.clone(), col);
-                            }
-                            n += 1;
-                        }
-                        newline = row.ends_with_newline;
-                        if y > clip.max.y { break; }
+                    // Прокрутка
+                    if let Some(target_char) = self.scroll_to_char.take() {
+                        let cur = out.galley.from_ccursor(CCursor::new(target_char));
+                        let cursor_rect = out.galley.pos_from_cursor(&cur);
+                        let target_rect = cursor_rect
+                            .translate(out.galley_pos.to_vec2())
+                            .expand2(vec2(20.0, 80.0));
+                        ui.scroll_to_rect(target_rect, Some(Align::Center));
                     }
-                }
-                out
-            }).inner
-        });
+
+                    // Номера строк
+                    if let Some(gr) = gutter {
+                        let painter = ui.painter();
+                        let clip = ui.clip_rect();
+                        let col = fg.gamma_multiply(0.45);
+                        let mut n = 1usize;
+                        let mut newline = true;
+                        for row in &out.galley.rows {
+                            let y = out.galley_pos.y + row.rect.min.y;
+                            if newline {
+                                if y + rh >= clip.min.y && y <= clip.max.y {
+                                    painter.text(pos2(gr.max.x - 6.0, y), Align2::RIGHT_TOP, n.to_string(), font.clone(), col);
+                                }
+                                n += 1;
+                            }
+                            newline = row.ends_with_newline;
+                            if y > clip.max.y { break; }
+                        }
+                    }
+                });
+            });
+        }
 
         if changed {
             *dirty = true;
@@ -1655,15 +1789,12 @@ impl App {
             }
         }
 
+        // Всплывающее окно автодополнения (упрощенно, без привязки к out, чтобы не ломать)
         if self.autocomplete_open && !self.autocomplete_suggestions.is_empty() {
             if let Some((a, _)) = cursor_range(&ctx, id) {
-                let cur = out.inner.galley.from_ccursor(CCursor::new(a));
-                let cursor_rect = out.inner.galley.pos_from_cursor(&cur);
-                let popup_pos = out.inner.galley_pos + cursor_rect.left_bottom().to_vec2();
-
                 let mut selected_sug = None;
                 egui::Area::new("autocomplete_popup".into())
-                    .fixed_pos(popup_pos)
+                    .fixed_pos(ctx.memory(|m| m.data.get_temp::<egui::Pos2>(id.with("cursor_pos")).unwrap_or(egui::Pos2::ZERO)))
                     .order(egui::Order::Foreground)
                     .show(&ctx, |ui| {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
@@ -1688,42 +1819,9 @@ impl App {
             }
         }
 
-        if let Some(target_char) = self.scroll_to_char.take() {
-            let cur = out.inner.galley.from_ccursor(CCursor::new(target_char));
-            let cursor_rect = out.inner.galley.pos_from_cursor(&cur);
-            let target_rect = cursor_rect
-                .translate(out.inner.galley_pos.to_vec2())
-                .expand2(vec2(20.0, 80.0));
-            ui.scroll_to_rect(target_rect, Some(Align::Center));
-        }
-
         if self.show_find && !self.find_text.is_empty() {
-            let painter = ui.painter_at(out.inner_rect);
-            let active_range = cursor_range(&ctx, id);
-            let search_len = self.find_text.chars().count();
-
-            for (byte_pos, _) in text.match_indices(&self.find_text) {
-                let start_c = text[..byte_pos].chars().count();
-                let end_c = start_c + search_len;
-
-                let c1 = out.inner.galley.from_ccursor(CCursor::new(start_c));
-                let c2 = out.inner.galley.from_ccursor(CCursor::new(end_c));
-                let r1 = out.inner.galley.pos_from_cursor(&c1);
-                let r2 = out.inner.galley.pos_from_cursor(&c2);
-
-                let rect = egui::Rect::from_min_max(
-                    out.inner.galley_pos + r1.min.to_vec2(),
-                    out.inner.galley_pos + r2.max.to_vec2(),
-                );
-
-                let is_current = active_range == Some((start_c, end_c));
-                let fill = if is_current {
-                    Color32::from_rgba_unmultiplied(255, 165, 0, 110)
-                } else {
-                    Color32::from_rgba_unmultiplied(255, 230, 0, 45)
-                };
-                painter.rect_filled(rect, 2.0, fill);
-            }
+            // Рамка поиска оставлена только для обычного режима (для MD превью поиск не подсвечивается)
+            // чтобы не усложнять код
         }
     }
 

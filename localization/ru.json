@@ -44,7 +44,7 @@
   "limited_mode": "Ограниченный режим",
   "file": "Файл",
   "btn_settings": "Настройки (F2)",
-  "btn_store": "Магазин плагинов",
+  "btn_store": "Плагины",
   "view": "Вид",
   "sidebar": "Боковая панель",
   "terminal": "Терминал",
@@ -109,5 +109,9 @@
   "build_command": "Команда сборки (F7):",
   "run_command": "Команда запуска (F5):",
   "revoke_trust": "🔓 Отозвать доверие",
-  "trust_project": "🔒 Доверять проекту"
+  "trust_project": "🔒 Доверять проекту",
+  "save_button_an_file": "Сохранить",
+  "open_file_button_an_file": "Открыть файл...",
+  "error_autosave": "Ошибка сохранения: ",
+  "save_all": "Сохранить всё"
 }

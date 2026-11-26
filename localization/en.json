@@ -44,7 +44,7 @@
   "limited_mode": "Limited mode",
   "file": "File",
   "btn_settings": "Settings (F2)",
-  "btn_store": "Shop plugins",
+  "btn_store": "Plugins",
   "view": "View",
   "sidebar": "Slidebar",
   "terminal": "Terminal",
@@ -109,5 +109,9 @@
   "build_command": "Build command (F7):",
   "run_command": "Run command (F5):",
   "revoke_trust": "🔓 Revoke Trust",
-  "trust_project": "🔒 Trust Project"
+  "trust_project": "🔒 Trust Project",
+  "save_button_an_file": "Save",
+  "open_file_button_an_file": "Open file...",
+  "error_autosave": "Error to save: ",
+  "save_all": "Save All"
 }

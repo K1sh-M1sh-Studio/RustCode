@@ -192,12 +192,11 @@ impl Terminal {
                         typed = true;
                     }
                     Event::Copy => {
-                        self.send(&[3]);
-                        typed = true;
+                        // УБРАНО: self.send(&[3]);
+                        // Теперь копирование не будет убивать процесс.
                     }
                     Event::Cut => {
-                        self.send(&[0x18]);
-                        typed = true;
+                        // УБРАНО: self.send(&[0x18]);
                     }
                     Event::Key { key, pressed: true, modifiers, .. } => {
                         if let Some(b) = key_bytes(key, &modifiers, app) {
@@ -331,9 +330,18 @@ fn key_bytes(key: Key, m: &Modifiers, app_cursor: bool) -> Option<Vec<u8>> {
                 let n = key.name();
                 if n.len() == 1 && n.as_bytes()[0].is_ascii_uppercase() {
                     let c = n.as_bytes()[0].to_ascii_lowercase();
-                    if matches!(c, b'c' | b'x' | b'v') && !cfg!(target_os = "macos") {
+
+                    // Если нажат Ctrl+C БЕЗ Shift — отправляем SIGINT (прерывание)
+                    if c == b'c' && !m.shift {
+                        return Some(vec![3]);
+                    }
+
+                    // Если нажат Ctrl+Shift+C / Ctrl+Shift+V — возвращаем None,
+                    // чтобы egui сам сделал Copy/Paste
+                    if matches!(c, b'c' | b'x' | b'v') {
                         return None;
                     }
+
                     return Some(vec![c - b'a' + 1]);
                 }
             }

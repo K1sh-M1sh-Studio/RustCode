@@ -1,3 +1,6 @@
+/* K1sh-M1sh Members - License MIT */
+/* © 2026, K1sh-M1sh Members */
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,6 +146,10 @@ pub struct Loc {
     pub run_command: String,
     pub revoke_trust: String,
     pub trust_project: String,
+    pub save_button_an_file: String,
+    pub open_file_button_an_file: String,
+    pub save_all: String,
+    pub error_autosave: String
 }
 
 impl Loc {
